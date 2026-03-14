@@ -9,15 +9,18 @@ type Tab = 'input' | 'pipeline' | 'output';
 type InputMode = 'paste' | 'upload';
 
 interface StageState {
-  id: 'chunker' | 'translator' | 'reviewer' | 'smoother' | 'assembler';
+  id: 'chunker' | 'translator' | 'reviewer1' | 'reviewer2' | 'smoother' | 'assembler';
   num: string; label: string; tagline: string;
   status: StageStatus; msg: string; progress: number | null;
 }
 
+interface Reviewer1Category { id: string; name: string; pass: boolean; issues: string[]; }
+
 interface ChunkData {
   index: number; original: string;
-  translation?: string; score?: number;
-  issues?: string[]; revised?: string; approved?: boolean;
+  translation?: string;
+  reviewer1?: { categories: Reviewer1Category[]; pitfalls: string[]; score: number; certifiable: boolean };
+  score?: number; issues?: string[]; revised?: string; approved?: boolean;
 }
 
 interface ChapterResult {
@@ -29,11 +32,12 @@ interface ChapterResult {
 // ── Constants ──────────────────────────────────────────────────────────────────
 
 const INITIAL_STAGES: StageState[] = [
-  { id: 'chunker',    num: '01', label: 'Chunker',    tagline: 'Splits text at paragraph/verse boundaries into ≤500-word chunks', status: 'waiting', msg: '', progress: null },
-  { id: 'translator', num: '02', label: 'Translator', tagline: 'Translates each chunk — trustee-of-tradition mindset, BAPS glossary enforced', status: 'waiting', msg: '', progress: null },
-  { id: 'reviewer',   num: '03', label: 'Reviewer',   tagline: 'Checks all 200+ house-style rules, terminology, historical accuracy', status: 'waiting', msg: '', progress: null },
-  { id: 'smoother',   num: '04', label: 'Smoother',   tagline: 'Readability pass — natural flow, transitions, without changing meaning', status: 'waiting', msg: '', progress: null },
-  { id: 'assembler',  num: '05', label: 'Assembler',  tagline: 'Joins all chunks into a single publication-ready document', status: 'waiting', msg: '', progress: null },
+  { id: 'chunker',    num: '01', label: 'Chunker',             tagline: 'Splits text at paragraph and verse boundaries into ≤500-word segments', status: 'waiting', msg: '', progress: null },
+  { id: 'translator', num: '02', label: 'Translator',          tagline: 'Translates each chunk — trustee-of-tradition mindset, full BAPS glossary enforced', status: 'waiting', msg: '', progress: null },
+  { id: 'reviewer1',  num: '03', label: 'Certification Audit', tagline: 'BAPS Translation Certification Checklist — 8 categories, 20 common pitfalls', status: 'waiting', msg: '', progress: null },
+  { id: 'reviewer2',  num: '04', label: 'Style Review',        tagline: 'House-style rules, 79+ before/after correction examples, all mandatory terminology', status: 'waiting', msg: '', progress: null },
+  { id: 'smoother',   num: '05', label: 'Smoother',            tagline: 'Readability pass — natural flow and transitions, without altering meaning', status: 'waiting', msg: '', progress: null },
+  { id: 'assembler',  num: '06', label: 'Assembler',           tagline: 'Joins all chunks into a single publication-ready document', status: 'waiting', msg: '', progress: null },
 ];
 
 const SAMPLE = `પ્રેમે પ્રગટ્યા રે સૂરજ સહજાનંદ, અધર્મ અંધારું ટાળિયું...
@@ -42,16 +46,14 @@ const SAMPLE = `પ્રેમે પ્રગટ્યા રે સૂરજ 
 
 સને 1781માં ત્રીજી એપ્રિલે, અયોધ્યા પાસે છપિયા ગામે ઉચ્ચ સરવરિયા બ્રાહ્મણ કુળમાં પ્રગટેલા આ અવતારી પુરુષે, બાળવયમાં જ તીવ્ર બુદ્ધિમત્તા, વિદ્વત્તા અને દિવ્યતાનો અસાધારણ અનુભવ કરાવ્યો; માત્ર 11 જ વર્ષની કુમળી વયે ગૃહત્યાગ કર્યો.`;
 
-const MAX_WORDS = 50000;
-const WARN_WORDS = 6000; // above this, timeout risk without book mode
+const MAX_WORDS  = 50000;
+const WARN_WORDS = 6000;
 
 // ── Shared styles ──────────────────────────────────────────────────────────────
 
 const labelStyle: React.CSSProperties = {
   fontSize: 10, fontWeight: 600, letterSpacing: 2, textTransform: 'uppercase', color: 'var(--text-light)', marginBottom: 8,
 };
-
-function wc(t: string) { return t.trim() ? t.trim().split(/\s+/).length : 0; }
 
 function badgeStyle(type: 'strong' | 'adequate' | 'weak' | 'running'): React.CSSProperties {
   const map = {
@@ -68,6 +70,16 @@ function badgeStyle(type: 'strong' | 'adequate' | 'weak' | 'running'): React.CSS
     background: t.bg, color: t.color, border: `1px solid ${t.border}`,
   };
 }
+
+function scoreTier(score: number): { label: string; type: 'strong' | 'adequate' | 'weak'; desc: string } {
+  if (score >= 90) return { label: 'Publication Ready', type: 'strong',   desc: 'Meets all Aksharpith publication standards.' };
+  if (score >= 80) return { label: 'Strong',            type: 'strong',   desc: 'Minor issues corrected — ready for editorial sign-off.' };
+  if (score >= 70) return { label: 'Revised',           type: 'adequate', desc: 'Multiple corrections applied by both reviewers.' };
+  if (score >= 60) return { label: 'Needs Work',        type: 'adequate', desc: 'Significant revision was required — verify manually.' };
+  return              { label: 'Poor',             type: 'weak',     desc: 'Major issues found — consider retranslating this chunk.' };
+}
+
+function wc(t: string) { return t.trim() ? t.trim().split(/\s+/).length : 0; }
 
 // ── StageCard ──────────────────────────────────────────────────────────────────
 
@@ -138,15 +150,13 @@ function FileUpload({ onExtracted, disabled }: { onExtracted: (text: string, fil
     const fd = new FormData();
     fd.append('file', file);
     try {
-      const res = await fetch('/api/upload', { method: 'POST', body: fd });
+      const res  = await fetch('/api/upload', { method: 'POST', body: fd });
       const data = await res.json() as { text?: string; filename?: string; chapters?: Array<{ title: string; startLine: number }>; error?: string };
       if (!res.ok || data.error) { setError(data.error ?? 'Upload failed'); return; }
       onExtracted(data.text ?? '', data.filename ?? file.name, data.chapters ?? null);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Upload failed');
-    } finally {
-      setUploading(false);
-    }
+    } finally { setUploading(false); }
   };
 
   return (
@@ -187,6 +197,166 @@ function FileUpload({ onExtracted, disabled }: { onExtracted: (text: string, fil
   );
 }
 
+// ── ChunkCard ──────────────────────────────────────────────────────────────────
+
+function ChunkCard({ chunk, expanded, onToggle }: { chunk: ChunkData; expanded: boolean; onToggle: () => void }) {
+  const hasR1 = chunk.reviewer1 !== undefined;
+  const hasR2 = chunk.score     !== undefined;
+
+  const passedCats  = chunk.reviewer1?.categories.filter(c => c.pass).length ?? 0;
+  const totalCats   = chunk.reviewer1?.categories.length ?? 0;
+  const certifiable = chunk.reviewer1?.certifiable ?? false;
+
+  const tier = hasR2 ? scoreTier(chunk.score!) : null;
+
+  const allIssues: Array<{ source: 'CERT' | 'STYLE'; text: string }> = [
+    ...(chunk.reviewer1?.pitfalls.map(p => ({ source: 'CERT' as const, text: p })) ?? []),
+    ...(chunk.issues?.map(i => ({ source: 'STYLE' as const, text: i })) ?? []),
+  ];
+
+  const displayText = chunk.revised || chunk.translation || '';
+
+  return (
+    <div style={{ background: 'var(--bg-white)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', overflow: 'hidden', marginBottom: 12 }} className="fadein">
+
+      {/* ── Header — always visible, click to toggle ── */}
+      <div
+        onClick={onToggle}
+        style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '13px 18px', background: 'var(--bg)', cursor: 'pointer', borderBottom: expanded ? '1px solid var(--border-light)' : 'none', userSelect: 'none' }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14, flex: 1, minWidth: 0 }}>
+          <span style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 13, color: 'var(--text-light)', letterSpacing: 1, flexShrink: 0 }}>Chunk {chunk.index + 1}</span>
+
+          {/* Certification badge */}
+          {hasR1 && (
+            <span style={{
+              fontSize: 10, fontWeight: 600, letterSpacing: 0.5, flexShrink: 0,
+              color: certifiable ? 'var(--green)' : totalCats > 0 ? 'var(--amber)' : 'var(--text-light)',
+            }}>
+              {certifiable ? '✓ Certified' : totalCats > 0 ? `${passedCats}/${totalCats} categories` : 'Auditing…'}
+            </span>
+          )}
+          {!hasR1 && !hasR2 && displayText && (
+            <span style={{ fontSize: 13, fontWeight: 300, color: 'var(--text-muted)', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>
+              {displayText.slice(0, 80)}{displayText.length > 80 ? '…' : ''}
+            </span>
+          )}
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+          {hasR2 && tier && (
+            <>
+              <span style={{ fontFamily: "'Karla', sans-serif", fontSize: 12, fontWeight: 700, color: tier.type === 'strong' ? 'var(--green)' : tier.type === 'adequate' ? 'var(--amber)' : 'var(--red)' }}>
+                {chunk.score}%
+              </span>
+              <span style={badgeStyle(tier.type)}>{tier.label}</span>
+            </>
+          )}
+          {allIssues.length > 0 && (
+            <span style={{ fontSize: 11, color: 'var(--amber)', fontWeight: 500 }}>
+              {allIssues.length} issue{allIssues.length !== 1 ? 's' : ''}
+            </span>
+          )}
+          <span style={{ fontSize: 11, color: 'var(--text-light)', marginLeft: 2 }}>{expanded ? '▲' : '▼'}</span>
+        </div>
+      </div>
+
+      {/* ── Collapsed preview ── */}
+      {!expanded && displayText && (
+        <div style={{ padding: '10px 18px', fontSize: 13, fontWeight: 300, color: 'var(--text-muted)', lineHeight: 1.65 }}>
+          {displayText.slice(0, 160)}{displayText.length > 160 ? '…' : ''}
+        </div>
+      )}
+
+      {/* ── Expanded detail ── */}
+      {expanded && (
+        <div style={{ padding: '0 18px 20px' }}>
+
+          {/* Score explanation */}
+          {hasR2 && tier && (
+            <div style={{ padding: '14px 0 14px', borderBottom: '1px solid var(--border-light)', marginBottom: 16 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+                <span style={{ ...labelStyle, marginBottom: 0 }}>Quality Score — Reviewer 2</span>
+                <span style={{ fontFamily: "'Karla', sans-serif", fontSize: 20, fontWeight: 700, color: tier.type === 'strong' ? 'var(--green)' : tier.type === 'adequate' ? 'var(--amber)' : 'var(--red)' }}>
+                  {chunk.score}%
+                </span>
+                <span style={badgeStyle(tier.type)}>{tier.label}</span>
+              </div>
+              <div style={{ height: 3, background: 'var(--border)', borderRadius: 2, marginBottom: 8 }}>
+                <div style={{ height: '100%', borderRadius: 2, width: `${chunk.score}%`, background: tier.type === 'strong' ? 'var(--green)' : tier.type === 'adequate' ? 'var(--amber)' : 'var(--red)', transition: 'width 0.5s' }} />
+              </div>
+              <div style={{ fontSize: 11, fontWeight: 300, color: 'var(--text-light)', lineHeight: 1.55 }}>
+                {tier.desc}{' '}
+                <span style={{ color: 'var(--text-muted)' }}>Reviewer 2 scores terminology, punctuation, tone, and historical accuracy against 79+ BAPS correction examples. ≥85% meets publication standard.</span>
+              </div>
+            </div>
+          )}
+
+          {/* Certification audit grid */}
+          {hasR1 && (chunk.reviewer1!.categories.length > 0 || chunk.reviewer1!.pitfalls.length > 0) && (
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
+                <span style={{ ...labelStyle, marginBottom: 0 }}>Certification Audit — Reviewer 1</span>
+                {certifiable
+                  ? <span style={badgeStyle('strong')}>✓ Certified</span>
+                  : <span style={badgeStyle('adequate')}>{passedCats}/{totalCats} passed</span>
+                }
+              </div>
+              {chunk.reviewer1!.categories.length > 0 && (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: '6px 16px', marginBottom: 8 }}>
+                  {chunk.reviewer1!.categories.map(cat => (
+                    <div key={cat.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 7 }}>
+                      <span style={{ fontSize: 13, color: cat.pass ? 'var(--green)' : 'var(--red)', flexShrink: 0, lineHeight: '18px' }}>{cat.pass ? '✓' : '✗'}</span>
+                      <div>
+                        <span style={{ fontSize: 12, fontWeight: cat.pass ? 300 : 600, color: cat.pass ? 'var(--text-muted)' : 'var(--text)' }}>{cat.name}</span>
+                        {!cat.pass && cat.issues.map((iss, j) => (
+                          <div key={j} style={{ fontSize: 11, color: 'var(--red)', fontWeight: 300, lineHeight: 1.4 }}>{iss}</div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Issues */}
+          {allIssues.length > 0 && (
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ ...labelStyle, marginBottom: 10 }}>Issues Found &amp; Corrected ({allIssues.length})</div>
+              <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {allIssues.map((issue, i) => (
+                  <li key={i} style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                    <span style={{
+                      fontSize: 9, fontWeight: 700, letterSpacing: 0.8, padding: '2px 6px', borderRadius: 2, flexShrink: 0, marginTop: 3,
+                      background: issue.source === 'CERT' ? 'var(--amber-bg)' : 'var(--bg-warm)',
+                      color:      issue.source === 'CERT' ? 'var(--amber)' : 'var(--text-light)',
+                      border:     `1px solid ${issue.source === 'CERT' ? 'var(--amber-border)' : 'var(--border)'}`,
+                    }}>
+                      {issue.source}
+                    </span>
+                    <span style={{ fontSize: 13, fontWeight: 300, color: 'var(--text-muted)', lineHeight: 1.65 }}>{issue.text}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Final translation */}
+          {displayText && (
+            <div>
+              <div style={{ ...labelStyle, marginBottom: 8 }}>Final Translation</div>
+              <div style={{ fontSize: 14, fontWeight: 300, color: 'var(--text-body)', lineHeight: 1.85, whiteSpace: 'pre-wrap', padding: '14px 16px', background: 'var(--bg)', borderRadius: 6, border: '1px solid var(--border-light)' }}>
+                {displayText}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Main Page ──────────────────────────────────────────────────────────────────
 
 export default function Home() {
@@ -196,6 +366,7 @@ export default function Home() {
   const [uploadedFilename, setUploadedFilename] = useState('');
   const [stages, setStages]       = useState<StageState[]>(INITIAL_STAGES);
   const [chunks, setChunks]       = useState<ChunkData[]>([]);
+  const [expandedChunks, setExpandedChunks] = useState<Set<number>>(new Set());
   const [output, setOutput]       = useState('');
   const [outputMeta, setOutputMeta] = useState({ words: 0, chunkCount: 0, avg: 0 });
   const [isRunning, setIsRunning] = useState(false);
@@ -203,17 +374,21 @@ export default function Home() {
   const [copied, setCopied]       = useState(false);
 
   // Book mode
-  const [isBookMode, setIsBookMode]   = useState(false);
+  const [isBookMode, setIsBookMode]     = useState(false);
   const [bookChapters, setBookChapters] = useState<ChapterResult[]>([]);
-  const [bookOutputs, setBookOutputs] = useState<string[]>([]);
+  const [bookOutputs, setBookOutputs]   = useState<string[]>([]);
   const [currentChapterIdx, setCurrentChapterIdx] = useState(0);
   const detectedChaptersRef = useRef<Array<{ title: string; startLine: number }> | null>(null);
 
-  const abortRef = useRef<AbortController | null>(null);
-  const chunkMap = useRef<Record<number, ChunkData>>({});
+  const abortRef  = useRef<AbortController | null>(null);
+  const chunkMap  = useRef<Record<number, ChunkData>>({});
 
   const updateStage = useCallback((id: string, updates: Partial<StageState>) => {
     setStages(prev => prev.map(s => s.id === id ? { ...s, ...updates } : s));
+  }, []);
+
+  const toggleChunk = useCallback((i: number) => {
+    setExpandedChunks(prev => { const n = new Set(prev); n.has(i) ? n.delete(i) : n.add(i); return n; });
   }, []);
 
   const words = wc(inputText);
@@ -223,6 +398,7 @@ export default function Home() {
   const runSection = async (text: string, chapterTitle?: string): Promise<{ output: string; avg: number; wordCount: number } | null> => {
     setStages(INITIAL_STAGES);
     setChunks([]);
+    setExpandedChunks(new Set());
     chunkMap.current = {};
 
     const response = await fetch('/api/translate', {
@@ -259,57 +435,93 @@ export default function Home() {
 
         if (ev.error) { streamError = ev.error as string; break outer; }
 
+        // ── Chunker ───────────────────────────────────────────────────
         if (ev.stage === 'chunker') {
-          if (ev.status === 'running') updateStage('chunker', { status: 'running', msg: 'Analysing structure…' });
-          else if (ev.status === 'done') {
+          if (ev.status === 'running') {
+            updateStage('chunker', { status: 'running', msg: 'Analysing structure and verse boundaries…' });
+          } else if (ev.status === 'done') {
             const n = ev.count as number;
-            updateStage('chunker', { status: 'done', msg: `Split into ${n} chunk${n !== 1 ? 's' : ''}`, progress: 100 });
+            updateStage('chunker', { status: 'done', msg: `Split into ${n} chunk${n !== 1 ? 's' : ''} at paragraph/verse boundaries`, progress: 100 });
             (ev.chunks as string[]).forEach((t, i) => { chunkMap.current[i] = { index: i, original: t }; });
             setChunks((ev.chunks as string[]).map((t, i) => ({ index: i, original: t })));
           }
         }
 
+        // ── Translator ────────────────────────────────────────────────
         if (ev.stage === 'translator') {
-          if (ev.status === 'running') updateStage('translator', { status: 'running', msg: 'Starting…', progress: 0 });
-          else if (ev.status === 'progress') {
+          if (ev.status === 'running') {
+            updateStage('translator', { status: 'running', msg: 'Applying gold standard glossary and house rules…', progress: 0 });
+          } else if (ev.status === 'progress') {
             const cur = ev.current as number, tot = ev.total as number;
-            updateStage('translator', { status: 'running', msg: `Translating chunk ${cur} of ${tot}…`, progress: Math.round((cur - 1) / tot * 100) });
+            updateStage('translator', { status: 'running', msg: `Translating chunk ${cur} of ${tot} — trustee-of-tradition mindset…`, progress: Math.round((cur - 1) / tot * 100) });
             const idx = ev.index as number;
             chunkMap.current[idx] = { ...chunkMap.current[idx], translation: ev.translation as string };
             setChunks(Object.values(chunkMap.current).sort((a, b) => a.index - b.index));
+          } else if (ev.status === 'done') {
+            updateStage('translator', { status: 'done', msg: 'All chunks translated with cross-chunk memory', progress: 100 });
           }
-          else if (ev.status === 'done') updateStage('translator', { status: 'done', msg: 'All chunks translated', progress: 100 });
         }
 
-        if (ev.stage === 'reviewer') {
-          if (ev.status === 'running') updateStage('reviewer', { status: 'running', msg: 'Starting review…', progress: 0 });
-          else if (ev.status === 'progress') {
+        // ── Reviewer 1 (Certification Audit) ─────────────────────────
+        if (ev.stage === 'reviewer1') {
+          if (ev.status === 'running') {
+            updateStage('reviewer1', { status: 'running', msg: 'Loading BAPS Certification Checklist and pitfall diagnostics…', progress: 0 });
+          } else if (ev.status === 'progress') {
             const chk = ev.chunk as number, tot = ev.total as number;
-            updateStage('reviewer', { status: 'running', msg: `Reviewing chunk ${chk} of ${tot}…`, progress: Math.round((chk - 1) / tot * 100) });
+            updateStage('reviewer1', { status: 'running', msg: `Auditing chunk ${chk} of ${tot} — 8 certification categories, 20 common pitfalls…`, progress: Math.round((chk - 1) / tot * 100) });
+            const idx = ev.index as number;
+            chunkMap.current[idx] = {
+              ...chunkMap.current[idx],
+              reviewer1: {
+                categories:  ev.categories as ChunkData['reviewer1']['categories'],
+                pitfalls:    ev.pitfalls   as string[],
+                score:       ev.score      as number,
+                certifiable: ev.certifiable as boolean,
+              },
+            };
+            setChunks(Object.values(chunkMap.current).sort((a, b) => a.index - b.index));
+          } else if (ev.status === 'done') {
+            const certCount = ev.certCount as number, total = ev.total as number;
+            updateStage('reviewer1', { status: 'done', msg: `Certification complete — ${certCount} of ${total} chunk${total !== 1 ? 's' : ''} fully certified`, progress: 100 });
+          }
+        }
+
+        // ── Reviewer 2 (Style Review) ─────────────────────────────────
+        if (ev.stage === 'reviewer2') {
+          if (ev.status === 'running') {
+            updateStage('reviewer2', { status: 'running', msg: 'Checking against 79+ BAPS correction examples and house rules…', progress: 0 });
+          } else if (ev.status === 'progress') {
+            const chk = ev.chunk as number, tot = ev.total as number;
+            updateStage('reviewer2', { status: 'running', msg: `Reviewing chunk ${chk} of ${tot} — scoring terminology, punctuation, and tone…`, progress: Math.round((chk - 1) / tot * 100) });
             const idx = ev.index as number;
             chunkMap.current[idx] = { ...chunkMap.current[idx], score: ev.score as number, issues: ev.issues as string[], revised: ev.revised as string, approved: (ev.score as number) >= 85 };
             setChunks(Object.values(chunkMap.current).sort((a, b) => a.index - b.index));
-          }
-          else if (ev.status === 'done') {
+          } else if (ev.status === 'done') {
             const avg = Math.round(ev.avgScore as number);
-            updateStage('reviewer', { status: 'done', msg: `All chunks reviewed — avg score ${avg}%`, progress: 100 });
+            updateStage('reviewer2', { status: 'done', msg: `Style review complete — avg quality score ${avg}%`, progress: 100 });
           }
         }
 
+        // ── Smoother ──────────────────────────────────────────────────
         if (ev.stage === 'smoother') {
-          if (ev.status === 'running') updateStage('smoother', { status: 'running', msg: 'Readability pass…', progress: 0 });
-          else if (ev.status === 'progress') {
+          if (ev.status === 'running') {
+            updateStage('smoother', { status: 'running', msg: 'Readability pass — smoothing paragraph flow and transitions…', progress: 0 });
+          } else if (ev.status === 'progress') {
             const cur = ev.current as number, tot = ev.total as number;
-            updateStage('smoother', { status: 'running', msg: `Smoothing chunk ${cur} of ${tot}…`, progress: Math.round((cur - 1) / tot * 100) });
+            updateStage('smoother', { status: 'running', msg: `Smoothing chunk ${cur} of ${tot} — restructuring long sentences…`, progress: Math.round((cur - 1) / tot * 100) });
+          } else if (ev.status === 'done') {
+            updateStage('smoother', { status: 'done', msg: 'Readability pass complete — flow and transitions refined', progress: 100 });
           }
-          else if (ev.status === 'done') updateStage('smoother', { status: 'done', msg: 'Readability pass complete', progress: 100 });
         }
 
+        // ── Assembler ─────────────────────────────────────────────────
         if (ev.stage === 'assembler') {
-          if (ev.status === 'running') updateStage('assembler', { status: 'running', msg: 'Assembling final document…' });
-          else if (ev.status === 'done') {
-            updateStage('assembler', { status: 'done', msg: 'Document assembled and ready' });
-            result = { output: ev.output as string, avg: ev.avgScore as number, wordCount: ev.wordCount as number };
+          if (ev.status === 'running') {
+            updateStage('assembler', { status: 'running', msg: 'Assembling all chunks into a single publication-ready document…' });
+          } else if (ev.status === 'done') {
+            const wCount = ev.wordCount as number, avg = ev.avgScore as number;
+            updateStage('assembler', { status: 'done', msg: `Document assembled — ${wCount.toLocaleString()} words · avg score ${avg}%` });
+            result = { output: ev.output as string, avg, wordCount: wCount };
           }
         }
       }
@@ -328,7 +540,7 @@ export default function Home() {
       return;
     }
     if (words > WARN_WORDS && !isBookMode) {
-      setPipelineError(`Warning: ${words.toLocaleString()} words may timeout on a single run (~${Math.round(words / 500 * 22 / 60)} min). Upload your document to enable book mode, which processes chapter by chapter.`);
+      setPipelineError(`Warning: ${words.toLocaleString()} words may timeout on a single run. Upload your document to enable book mode, which processes chapter by chapter.`);
       return;
     }
 
@@ -340,7 +552,6 @@ export default function Home() {
 
     try {
       if (isBookMode && bookChapters.length > 0) {
-        // ── Book mode: process each chapter ─────────────────────────
         const allOutputs: string[] = new Array(bookChapters.length).fill('');
         const chapterLines = inputText.split('\n');
 
@@ -348,8 +559,8 @@ export default function Home() {
           setCurrentChapterIdx(i);
           setBookChapters(prev => prev.map((c, j) => j === i ? { ...c, status: 'running' } : c));
 
-          const start = bookChapters[i].startLine ?? 0;
-          const end   = bookChapters[i + 1]?.startLine ?? chapterLines.length;
+          const start  = bookChapters[i].startLine ?? 0;
+          const end    = bookChapters[i + 1]?.startLine ?? chapterLines.length;
           const chText = chapterLines.slice(start, end).join('\n').trim();
 
           if (!chText) {
@@ -378,7 +589,6 @@ export default function Home() {
         if (combined) setTimeout(() => setTab('output'), 400);
 
       } else {
-        // ── Single section mode ─────────────────────────────────────
         const res = await runSection(inputText);
         if (res) {
           setOutput(res.output);
@@ -423,7 +633,6 @@ export default function Home() {
     URL.revokeObjectURL(url);
   };
 
-  // Measure header height for sticky tab bar
   const headerRef = useRef<HTMLElement>(null);
   useEffect(() => {
     const update = () => {
@@ -453,7 +662,7 @@ export default function Home() {
         <div style={{ fontFamily: '"Cormorant Garamond", serif', fontWeight: 300, fontSize: 26, color: 'var(--text)', letterSpacing: '-0.3px' }}>
           Translation <em>Pipeline</em>
           <span style={{ fontFamily: "'Karla', sans-serif", fontSize: 10, fontWeight: 600, letterSpacing: 1, color: 'var(--text-light)', marginLeft: 12, verticalAlign: 'middle' }}>
-            5 AGENTS · GOLD STANDARD
+            6 AGENTS · GOLD STANDARD
           </span>
         </div>
       </header>
@@ -512,7 +721,7 @@ export default function Home() {
                     </div>
                     <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
                       {words.toLocaleString()} words
-                      {isBookMode && bookChapters.length > 0 && ` · ${bookChapters.length} chapters detected — book mode active`}
+                      {isBookMode && bookChapters.length > 0 && ` · ${bookChapters.length} sections detected — book mode active`}
                     </div>
                     <div style={{ fontSize: 12, color: 'var(--text-light)', marginTop: 6, fontFamily: '"Cormorant Garamond", serif', fontStyle: 'italic', lineHeight: 1.5 }}>
                       {inputText.slice(0, 200)}…
@@ -550,10 +759,10 @@ export default function Home() {
             <div style={{ background: 'var(--green-bg)', border: '1px solid var(--green-border)', borderRadius: 'var(--radius)', padding: '18px 22px' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
                 <div style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 18, color: 'var(--text)' }}>Book Mode</div>
-                <span style={badgeStyle('strong')}>{bookChapters.length} chapters</span>
+                <span style={badgeStyle('strong')}>{bookChapters.length} sections</span>
               </div>
               <div style={{ fontSize: 12, fontWeight: 300, color: 'var(--text-muted)', lineHeight: 1.6 }}>
-                Each chapter will be processed as a separate pipeline run. The pipeline maintains cross-chapter consistency via translation memory.
+                Each section will be processed as a separate 6-agent pipeline run. Translation memory is maintained across sections.
               </div>
               <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 4 }}>
                 {bookChapters.slice(0, 8).map((ch, i) => (
@@ -570,17 +779,17 @@ export default function Home() {
             </div>
           )}
 
-          {/* Style rules */}
+          {/* Gold Standard context active */}
           <div style={{ background: 'var(--bg-warm)', borderLeft: '2px solid var(--text-light)', borderRadius: '0 var(--radius) var(--radius) 0', padding: '20px 24px' }}>
             <div style={{ ...labelStyle, marginBottom: 10 }}>Gold Standard Context Active</div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
               {[
                 'Aksharpith House Rules (full)',
                 'Master Glossary (200+ terms)',
-                'BAPS Translation Corrections',
-                '5-agent pipeline w/ memory',
-                'Cross-chunk consistency',
-                'Readability smoother pass',
+                'BAPS Certification Checklist',
+                'BAPS Common Pitfalls (20 items)',
+                '79+ before/after corrections',
+                'Cross-chunk translation memory',
               ].map(rule => (
                 <div key={rule} style={{ fontSize: 13, fontWeight: 300, color: 'var(--text-muted)', display: 'flex', gap: 8, alignItems: 'flex-start' }}>
                   <span style={{ color: 'var(--green)', fontWeight: 500, flexShrink: 0 }}>✓</span>
@@ -606,7 +815,7 @@ export default function Home() {
             }}
           >
             {isRunning
-              ? `${isBookMode ? `Processing chapter ${currentChapterIdx + 1} of ${bookChapters.length}` : 'Pipeline running'}… (click to stop)`
+              ? `${isBookMode ? `Processing section ${currentChapterIdx + 1} of ${bookChapters.length}` : 'Pipeline running'}… (click to stop)`
               : `Run ${isBookMode ? 'Book' : ''} Translation Pipeline →`}
           </button>
         </div>
@@ -630,45 +839,39 @@ export default function Home() {
 
           {/* Chunk detail */}
           {chunks.length > 0 && (
-            <div style={{ marginTop: 32 }}>
-              <div style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 24, fontWeight: 400, color: 'var(--text)', marginBottom: 4, marginTop: 8 }}>
-                Chunk Detail
+            <div style={{ marginTop: 36 }}>
+              <div style={{ display: 'flex', alignItems: 'baseline', gap: 14, marginBottom: 4 }}>
+                <div style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 24, fontWeight: 400, color: 'var(--text)' }}>
+                  Chunk Detail
+                </div>
+                <span style={{ fontSize: 11, color: 'var(--text-light)', fontWeight: 300 }}>Click any chunk to expand</span>
               </div>
               <div style={{ width: 48, height: 1, background: 'var(--border)', margin: '8px 0 16px' }} />
+
+              {/* Score legend */}
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 16px', marginBottom: 16, padding: '10px 14px', background: 'var(--bg-warm)', borderRadius: 6, border: '1px solid var(--border)' }}>
+                <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: 1.5, textTransform: 'uppercase', color: 'var(--text-light)', width: '100%', marginBottom: 4 }}>Score Guide — Reviewer 2</span>
+                {[
+                  { label: '90–100%', name: 'Publication Ready', type: 'strong' as const },
+                  { label: '80–89%',  name: 'Strong',            type: 'strong' as const },
+                  { label: '70–79%',  name: 'Revised',           type: 'adequate' as const },
+                  { label: '60–69%',  name: 'Needs Work',        type: 'adequate' as const },
+                  { label: '<60%',    name: 'Poor',              type: 'weak' as const },
+                ].map(s => (
+                  <div key={s.label} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                    <span style={{ fontSize: 11, color: 'var(--text-light)', fontWeight: 300 }}>{s.label}</span>
+                    <span style={badgeStyle(s.type)}>{s.name}</span>
+                  </div>
+                ))}
+              </div>
+
               {chunks.map(chunk => (
-                <div key={chunk.index} style={{ background: 'var(--bg-white)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', overflow: 'hidden', marginBottom: 12 }} className="fadein">
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 18px', borderBottom: '1px solid var(--border-light)', background: 'var(--bg)' }}>
-                    <span style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 13, color: 'var(--text-light)', letterSpacing: 1 }}>Chunk {chunk.index + 1}</span>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      {chunk.score !== undefined && (
-                        <span style={{ fontFamily: "'Karla', sans-serif", fontSize: 11, fontWeight: 500, color: chunk.score >= 85 ? 'var(--green)' : 'var(--amber)' }}>
-                          {chunk.score}%
-                        </span>
-                      )}
-                      {chunk.score !== undefined && (
-                        <span style={badgeStyle(chunk.score >= 85 ? 'strong' : chunk.score >= 70 ? 'adequate' : 'weak')}>
-                          {chunk.score >= 85 ? (chunk.approved ? 'Approved' : 'Strong') : chunk.score >= 70 ? 'Revised' : 'Weak'}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                  <div style={{ padding: '16px 18px' }}>
-                    <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: 2, textTransform: 'uppercase' as const, color: 'var(--text-light)', marginBottom: 8 }}>Translation</div>
-                    <div style={{ fontSize: 14, fontWeight: 300, color: 'var(--text-body)', lineHeight: 1.75 }}>
-                      {(chunk.revised || chunk.translation || '').slice(0, 280)}
-                      {(chunk.revised || chunk.translation || '').length > 280 ? '…' : ''}
-                    </div>
-                    {chunk.issues && chunk.issues.length > 0 && (
-                      <ul style={{ listStyle: 'none', marginTop: 12, padding: 0 }}>
-                        {chunk.issues.map((issue, i) => (
-                          <li key={i} style={{ fontSize: 13, fontWeight: 300, color: 'var(--amber)', paddingLeft: 18, position: 'relative', lineHeight: 1.7, marginBottom: 4 }}>
-                            <span style={{ position: 'absolute', left: 0 }}>—</span>{issue}
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
-                </div>
+                <ChunkCard
+                  key={chunk.index}
+                  chunk={chunk}
+                  expanded={expandedChunks.has(chunk.index)}
+                  onToggle={() => toggleChunk(chunk.index)}
+                />
               ))}
             </div>
           )}
@@ -692,7 +895,7 @@ export default function Home() {
               <div>
                 <div style={{ fontFamily: '"Cormorant Garamond", serif', fontWeight: 300, fontSize: 28, color: 'var(--text)', letterSpacing: '-0.3px' }}>Final Translation</div>
                 <div style={{ fontSize: 12, fontWeight: 300, color: 'var(--text-muted)', marginTop: 4 }}>
-                  {outputMeta.words.toLocaleString()} words · {outputMeta.chunkCount} section{outputMeta.chunkCount !== 1 ? 's' : ''} · avg score {outputMeta.avg}%
+                  {outputMeta.words.toLocaleString()} words · {outputMeta.chunkCount} section{outputMeta.chunkCount !== 1 ? 's' : ''} · avg quality score {outputMeta.avg}%
                 </div>
               </div>
               <div style={{ width: 48, height: 1, background: 'var(--border)' }} />

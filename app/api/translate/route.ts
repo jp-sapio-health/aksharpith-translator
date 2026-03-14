@@ -176,8 +176,89 @@ ${KEY_GLOSSARY}
 
 MINDSET: You are translating sacred biographical and historical Gujarati texts. Every sentence carries devotional, historical, and doctrinal weight. Preserve it completely. Provide ONLY the English translation — no preamble, no notes, no commentary.`;
 
-// PROMPT 3 (Reviewer): Checks against house style + correction examples
-const REVIEWER_SYSTEM = `You are a senior editorial reviewer for Aksharpith publications. You check Gujarati-to-English translations against the house style and BAPS correction standards.
+// ─── REVIEWER 1: BAPS Translation Certification Checklist + Common Pitfalls ───
+const REVIEWER1_SYSTEM = `You are a BAPS translation certification auditor. Perform a structured pre-publication certification audit against the BAPS Translation Certification Checklist and the Common Pitfalls in BAPS Translation diagnostic tool.
+
+BAPS TRANSLATION CERTIFICATION CHECKLIST:
+
+A. TERMINOLOGY — Verify mandatory terms are used correctly:
+   mandir (NEVER "temple") | Swami/Swamis (NEVER "saint/saints/sadhu")
+   Akshardham (NEVER "divine abode" or "heavenly abode") | Shriji Maharaj (two words — NEVER "Shrijimaharaj")
+   Bhagwan Swaminarayan (NEVER "Lord Swaminarayan") | Swamishri (for Pramukh/Mahant Swami Maharaj after first reference)
+   austerities (NEVER "penance") | devotees (NEVER "haribhaktas")
+   seva / satsang / arti / vichran / mukhpath (BAPS exact spellings — never service/fellowship/aarti/vicharan/recitation)
+   successor (NEVER "torchbearer") | santmandal (for a collective group of saints)
+
+B. PUNCTUATION — Verify:
+   Curly double speech marks " " for ALL direct quotations (NEVER straight " or ')
+   Spaced en dash ( – ) for parenthetical clauses (NEVER em dash —)
+   Footnotes end with full stops if complete sentences
+
+C. DIACRITICS — Verify:
+   NO macrons (ā, ī, ū, ṛ, ṅ, ṭ, ḍ) anywhere in PROSE
+   Diacritics are permitted ONLY inside directly quoted canonical or poetic verses
+   Correct prose spellings: prapti, bhakti, atma, murti, akshar, dhyan (no diacritics)
+
+D. TONE & REGISTER — Verify:
+   British English throughout (colour, travelling, organise, programme, fulfil)
+   Oxford -ize forms (organize, realize, recognize) — not -ise
+   No American marketing language ("life-changing", "BAPS is proud to announce")
+   No casual register, no modern management terms in historical contexts
+   No "mythology" for Hindu sacred texts (use "scripture" or "sacred history")
+   Dignified, measured, reverent scholarly tone throughout
+
+E. TRANSLATION FIDELITY — Verify:
+   Nothing added that is not in the Gujarati source
+   Nothing omitted or paraphrased
+   Direct speech preserved in first person (NEVER converted to indirect speech: "he said that…")
+   No interpreter commentary or editorial explanation inserted into the text
+
+F. VERSE & POETRY HANDLING — Verify:
+   Roman transliteration appears FIRST before the English meaning
+   Both transliteration and English meaning are present (not just one)
+   Original Gujarati/Sanskrit verse reproduced in full (no ellipsis to truncate)
+   Transliterated verses italicised
+
+G. HISTORICAL ACCURACY — Verify:
+   Exact dates and times preserved (e.g. "2.16 a.m." — not approximated to "early morning")
+   Place names use exact BAPS spellings: Chansad, Bamangam, Dhuliya, Dangara, Bhadrod, Piplana
+   Era-correct names used ("Bombay Province" not "Mumbai" for historical references)
+
+H. COMPLETENESS — Verify:
+   All paragraphs from the source have been translated; no sentence is truncated
+
+COMMON PITFALLS IN BAPS TRANSLATION (check each explicitly):
+1. "saints" / "saint" used instead of "Swamis" / "Swami"
+2. "temple" used instead of "mandir"
+3. "Lord Swaminarayan" used instead of "Bhagwan Swaminarayan"
+4. "divine abode" or "heavenly abode" used instead of "Akshardham"
+5. "Shrijimaharaj" written as one word instead of "Shriji Maharaj" (two words)
+6. "penance" used instead of "austerities"
+7. "haribhaktas" used instead of "devotees"
+8. Direct speech converted to indirect speech ("he said that…")
+9. Commentary or interpretation added that is not in the Gujarati source
+10. Straight quotes used instead of curly quotes
+11. Em dash (—) used instead of spaced en dash ( – )
+12. Macrons used in prose (prāpti, bhaktī instead of prapti, bhakti)
+13. Verse transliteration missing before the English meaning
+14. "mythology" used for Hindu sacred texts
+15. "aarti" used instead of "arti"
+16. "vicharan" used instead of "vichran"
+17. "torchbearer" used instead of "successor"
+18. Misspelled place names: "Chanasad" → Chansad | "Bamangaon" → Bamangam | "Dungara" → Dangara
+19. American English spellings: color → colour | traveling → travelling | center → centre
+20. "satsang" translated as "fellowship" instead of being kept as "satsang"
+
+For each category A–H: determine pass (true) or fail (false) and list specific issues with examples from the text.
+List all pitfalls found with a brief example from the text.
+Score 0–100: start at 100 and deduct points per issue (minor: 3–5pts, major: 8–12pts, critical: 15–20pts).
+Produce a corrected revised translation that fixes ALL issues identified above.
+Set "certifiable" to true only if ALL 8 categories pass and zero pitfalls are found.
+
+Return ONLY valid JSON — no markdown fences, no prose outside JSON.`;
+
+// REVIEWER 2 (was REVIEWER_SYSTEM): Checks against house style + correction examples
+const REVIEWER2_SYSTEM = `You are a senior editorial reviewer for Aksharpith publications. You check Gujarati-to-English translations against the house style and BAPS correction standards.
 
 ${HOUSE_RULES_CONTEXT}
 
@@ -266,12 +347,43 @@ async function translatorAgent(
 
 interface ReviewResult { score: number; issues: string[]; revised: string; }
 
-async function reviewerAgent(
+interface Reviewer1Result {
+  categories: Array<{ id: string; name: string; pass: boolean; issues: string[] }>;
+  pitfalls: string[];
+  score: number;
+  revised: string;
+  certifiable: boolean;
+}
+
+async function reviewer1Agent(
+  apiKey: string, original: string, translation: string,
+): Promise<Reviewer1Result> {
+  const fallback: Reviewer1Result = { categories: [], pitfalls: [], score: 75, revised: translation, certifiable: false };
+  const raw = await callClaude({
+    model: 'claude-sonnet-4-20250514', max_tokens: 8192, apiKey,
+    system: REVIEWER1_SYSTEM,
+    messages: [{ role: 'user', content: `GUJARATI SOURCE:\n${original}\n\nTRANSLATION TO AUDIT:\n${translation}\n\nReturn JSON:\n{"categories": [{"id": "terminology", "name": "Terminology", "pass": true, "issues": []}, {"id": "punctuation", "name": "Punctuation", "pass": true, "issues": []}, {"id": "diacritics", "name": "Diacritics", "pass": true, "issues": []}, {"id": "tone", "name": "Tone & Register", "pass": true, "issues": []}, {"id": "fidelity", "name": "Fidelity", "pass": true, "issues": []}, {"id": "verse", "name": "Verse Handling", "pass": true, "issues": []}, {"id": "historical", "name": "Historical Accuracy", "pass": true, "issues": []}, {"id": "completeness", "name": "Completeness", "pass": true, "issues": []}], "pitfalls": ["example pitfall found"], "score": <0-100>, "revised": "<corrected translation>", "certifiable": false}` }],
+  });
+  const match = raw.match(/\{[\s\S]*\}/);
+  if (!match) return fallback;
+  try {
+    const p = JSON.parse(match[0]);
+    return {
+      categories:  Array.isArray(p.categories) ? p.categories : [],
+      pitfalls:    Array.isArray(p.pitfalls)   ? p.pitfalls.filter((s: unknown) => typeof s === 'string') : [],
+      score:       typeof p.score === 'number'  ? Math.max(0, Math.min(100, p.score)) : 75,
+      revised:     typeof p.revised === 'string' && p.revised.trim() ? p.revised.trim() : translation,
+      certifiable: typeof p.certifiable === 'boolean' ? p.certifiable : false,
+    };
+  } catch { return fallback; }
+}
+
+async function reviewer2Agent(
   apiKey: string, original: string, translation: string,
 ): Promise<ReviewResult> {
   const raw = await callClaude({
     model: 'claude-sonnet-4-20250514', max_tokens: 8192, apiKey,
-    system: REVIEWER_SYSTEM,
+    system: REVIEWER2_SYSTEM,
     messages: [{ role: 'user', content: `ORIGINAL (Gujarati):\n${original}\n\nTRANSLATION TO REVIEW:\n${translation}\n\nReturn JSON:\n{"score": <integer 0-100>, "issues": ["issue 1", ...], "revised": "<corrected translation or identical if no changes>"}` }],
   });
   const match = raw.match(/\{[\s\S]*\}/);
@@ -377,19 +489,33 @@ export async function POST(req: NextRequest) {
         }
         send({ stage: 'translator', status: 'done', memorySize: translationMemory.length });
 
-        // ── Stage 3: Reviewer ──────────────────────────────────────────
-        send({ stage: 'reviewer', status: 'running' });
+        // ── Stage 3: Reviewer 1 (BAPS Certification Audit) ────────────
+        send({ stage: 'reviewer1', status: 'running' });
+        const reviewer1Results: Reviewer1Result[] = [];
+
+        for (let i = 0; i < chunks.length; i++) {
+          let r1: Reviewer1Result = { categories: [], pitfalls: [], score: 75, revised: translations[i], certifiable: false };
+          await keepalive(async () => { r1 = await reviewer1Agent(apiKey, chunks[i], translations[i]); });
+          reviewer1Results.push(r1);
+          send({ stage: 'reviewer1', status: 'progress', chunk: i + 1, total: chunks.length, index: i, categories: r1.categories, pitfalls: r1.pitfalls, score: r1.score, certifiable: r1.certifiable });
+        }
+
+        const certCount = reviewer1Results.filter(r => r.certifiable).length;
+        send({ stage: 'reviewer1', status: 'done', certCount, total: chunks.length });
+
+        // ── Stage 4: Reviewer 2 (Style + Correction Examples) ─────────
+        send({ stage: 'reviewer2', status: 'running' });
         const reviews: ReviewResult[] = [];
 
         for (let i = 0; i < chunks.length; i++) {
-          let review: ReviewResult = { score: 70, issues: [], revised: translations[i] };
-          await keepalive(async () => { review = await reviewerAgent(apiKey, chunks[i], translations[i]); });
+          let review: ReviewResult = { score: 70, issues: [], revised: reviewer1Results[i].revised };
+          await keepalive(async () => { review = await reviewer2Agent(apiKey, chunks[i], reviewer1Results[i].revised); });
           reviews.push(review);
-          send({ stage: 'reviewer', status: 'progress', chunk: i + 1, total: chunks.length, index: i, score: review.score, issues: review.issues, revised: review.revised });
+          send({ stage: 'reviewer2', status: 'progress', chunk: i + 1, total: chunks.length, index: i, score: review.score, issues: review.issues, revised: review.revised });
         }
 
         const avgScore = reviews.reduce((s, r) => s + r.score, 0) / reviews.length;
-        send({ stage: 'reviewer', status: 'done', avgScore });
+        send({ stage: 'reviewer2', status: 'done', avgScore });
 
         // ── Stage 4: Smoother (Prompt 4 — readability pass) ───────────
         send({ stage: 'smoother', status: 'running' });

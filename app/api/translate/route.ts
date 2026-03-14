@@ -1,6 +1,9 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { NextRequest } from 'next/server';
 
+export const dynamic    = 'force-dynamic';
+export const maxDuration = 300;
+
 // ─── System prompts ────────────────────────────────────────────────────────────
 
 const TRANSLATION_SYSTEM = `\
@@ -212,9 +215,10 @@ export async function POST(req: NextRequest) {
 
   return new Response(stream, {
     headers: {
-      'Content-Type':  'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection':    'keep-alive',
+      'Content-Type':       'text/event-stream',
+      'Cache-Control':      'no-cache, no-transform',
+      'Connection':         'keep-alive',
+      'X-Accel-Buffering':  'no',
     },
   });
 }

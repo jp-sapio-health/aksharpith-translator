@@ -473,9 +473,9 @@ export default function Home() {
             chunkMap.current[idx] = {
               ...chunkMap.current[idx],
               reviewer1: {
-                categories:  ev.categories as ChunkData['reviewer1']['categories'],
-                pitfalls:    ev.pitfalls   as string[],
-                score:       ev.score      as number,
+                categories:  ev.categories  as Reviewer1Category[],
+                pitfalls:    ev.pitfalls    as string[],
+                score:       ev.score       as number,
                 certifiable: ev.certifiable as boolean,
               },
             };

@@ -139,60 +139,184 @@ function ChapterBar({ chapters }: { chapters: ChapterResult[] }) {
 
 // ── FileUpload ─────────────────────────────────────────────────────────────────
 
-function FileUpload({ onExtracted, disabled }: { onExtracted: (text: string, filename: string, chapters: Array<{ title: string; startLine: number }> | null) => void; disabled: boolean }) {
-  const [dragging, setDragging]   = useState(false);
-  const [uploading, setUploading] = useState(false);
-  const [error, setError]         = useState<string | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+const UPLOAD_ACCEPT = '.pdf,.docx,.doc,.txt,.png,.jpg,.jpeg,.webp,.gif';
 
-  const process = async (file: File) => {
-    setUploading(true); setError(null);
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024)        return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function fileTypeLabel(name: string): string {
+  const ext = name.split('.').pop()?.toLowerCase() ?? '';
+  const map: Record<string, string> = { pdf: 'PDF', docx: 'DOCX', doc: 'DOC', txt: 'TXT', png: 'PNG', jpg: 'JPG', jpeg: 'JPG', webp: 'WEBP', gif: 'GIF' };
+  return map[ext] ?? ext.toUpperCase();
+}
+
+type UploadPhase = 'idle' | 'uploading' | 'processing' | 'done' | 'error';
+
+function FileUpload({ onExtracted, disabled }: { onExtracted: (text: string, filename: string, chapters: Array<{ title: string; startLine: number }> | null) => void; disabled: boolean }) {
+  const [dragging, setDragging]           = useState(false);
+  const [selectedFile, setSelectedFile]   = useState<File | null>(null);
+  const [phase, setPhase]                 = useState<UploadPhase>('idle');
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [error, setError]                 = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const xhrRef   = useRef<XMLHttpRequest | null>(null);
+
+  const startUpload = (file: File) => {
+    setSelectedFile(file);
+    setError(null);
+    setPhase('uploading');
+    setUploadProgress(0);
+
     const fd = new FormData();
     fd.append('file', file);
-    try {
-      const res  = await fetch('/api/upload', { method: 'POST', body: fd });
-      const data = await res.json() as { text?: string; filename?: string; chapters?: Array<{ title: string; startLine: number }>; error?: string };
-      if (!res.ok || data.error) { setError(data.error ?? 'Upload failed'); return; }
-      onExtracted(data.text ?? '', data.filename ?? file.name, data.chapters ?? null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Upload failed');
-    } finally { setUploading(false); }
+
+    const xhr = new XMLHttpRequest();
+    xhrRef.current = xhr;
+
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable) setUploadProgress(Math.round(e.loaded / e.total * 100));
+    });
+
+    xhr.upload.addEventListener('loadend', () => {
+      setPhase('processing');
+    });
+
+    xhr.addEventListener('load', () => {
+      try {
+        const data = JSON.parse(xhr.responseText);
+        if (xhr.status >= 400 || data.error) {
+          setError(data.error ?? `Upload failed (HTTP ${xhr.status})`);
+          setPhase('error');
+        } else {
+          setPhase('done');
+          onExtracted(data.text ?? '', data.filename ?? file.name, data.chapters ?? null);
+        }
+      } catch {
+        setError('Failed to parse server response');
+        setPhase('error');
+      }
+    });
+
+    xhr.addEventListener('error', () => {
+      setError('Upload failed — check your connection and try again');
+      setPhase('error');
+    });
+
+    xhr.addEventListener('timeout', () => {
+      setError('Upload timed out — file may be too large for your connection');
+      setPhase('error');
+    });
+
+    xhr.timeout = 300000; // 5 min
+    xhr.open('POST', '/api/upload');
+    xhr.send(fd);
   };
+
+  const handleRetry = () => { if (selectedFile) startUpload(selectedFile); };
+  const handleReset = () => {
+    xhrRef.current?.abort();
+    setSelectedFile(null);
+    setPhase('idle');
+    setError(null);
+    setUploadProgress(0);
+  };
+
+  const isActive = phase !== 'idle' && phase !== 'error';
 
   return (
     <div>
-      <div
-        onClick={() => !disabled && !uploading && inputRef.current?.click()}
-        onDragOver={e => { e.preventDefault(); setDragging(true); }}
-        onDragLeave={() => setDragging(false)}
-        onDrop={e => { e.preventDefault(); setDragging(false); const f = e.dataTransfer.files[0]; if (f) process(f); }}
-        style={{
-          border: `2px dashed ${dragging ? 'var(--text)' : 'var(--border)'}`,
-          borderRadius: 'var(--radius)', padding: '32px 24px', textAlign: 'center',
-          cursor: disabled || uploading ? 'not-allowed' : 'pointer',
-          background: dragging ? 'var(--bg-warm)' : 'var(--bg-white)',
-          transition: 'all 0.2s', opacity: disabled ? 0.6 : 1,
-        }}
-      >
-        <div style={{ fontSize: 28, marginBottom: 8, opacity: 0.4 }}>↑</div>
-        {uploading ? (
-          <>
-            <div style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 18, color: 'var(--text-muted)' }}>Extracting text… <span className="spinning">◌</span></div>
-            <div style={{ fontSize: 12, color: 'var(--text-light)', marginTop: 4 }}>Claude is reading your document</div>
-          </>
-        ) : (
-          <>
-            <div style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 20, color: 'var(--text)' }}>Drop your file here</div>
-            <div style={{ fontSize: 12, fontWeight: 300, color: 'var(--text-light)', marginTop: 6 }}>PDF · DOCX · TXT — entire books accepted</div>
-          </>
-        )}
-      </div>
-      <input ref={inputRef} type="file" accept=".pdf,.docx,.txt" style={{ display: 'none' }} onChange={e => { const f = e.target.files?.[0]; if (f) process(f); }} />
-      {error && (
-        <div style={{ background: 'var(--red-bg)', border: '1px solid var(--red-border)', borderRadius: 'var(--radius)', padding: '10px 14px', fontSize: 13, color: 'var(--red)', marginTop: 10 }}>
-          {error}
+      {/* ── Drop zone (shown when idle or error with no file) ── */}
+      {(phase === 'idle' || (phase === 'error' && !selectedFile)) && (
+        <div
+          onClick={() => !disabled && inputRef.current?.click()}
+          onDragOver={e => { e.preventDefault(); setDragging(true); }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={e => { e.preventDefault(); setDragging(false); const f = e.dataTransfer.files[0]; if (f) startUpload(f); }}
+          style={{
+            border: `2px dashed ${dragging ? 'var(--text)' : 'var(--border)'}`,
+            borderRadius: 'var(--radius)', padding: '32px 24px', textAlign: 'center',
+            cursor: disabled ? 'not-allowed' : 'pointer',
+            background: dragging ? 'var(--bg-warm)' : 'var(--bg-white)',
+            transition: 'all 0.2s', opacity: disabled ? 0.6 : 1,
+          }}
+        >
+          <div style={{ fontSize: 28, marginBottom: 8, opacity: 0.4 }}>↑</div>
+          <div style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 20, color: 'var(--text)' }}>Drop your file here</div>
+          <div style={{ fontSize: 12, fontWeight: 300, color: 'var(--text-light)', marginTop: 6 }}>PDF · DOCX · DOC · TXT · PNG · JPG · WEBP · GIF</div>
+          <div style={{ fontSize: 11, color: 'var(--text-light)', marginTop: 4, opacity: 0.7 }}>Up to 100 MB · entire books accepted</div>
         </div>
       )}
+
+      {/* ── File card (shown during upload/processing/done/error-with-file) ── */}
+      {selectedFile && phase !== 'idle' && (
+        <div style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius)', overflow: 'hidden' }} className="fadein">
+          {/* File header */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', background: 'var(--bg)', borderBottom: '1px solid var(--border-light)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1, minWidth: 0 }}>
+              <span style={{ ...badgeStyle(phase === 'done' ? 'strong' : phase === 'error' ? 'weak' : 'running'), flexShrink: 0 }}>
+                {fileTypeLabel(selectedFile.name)}
+              </span>
+              <span style={{ fontSize: 13, fontWeight: 400, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {selectedFile.name}
+              </span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+              <span style={{ fontSize: 11, color: 'var(--text-light)' }}>{formatFileSize(selectedFile.size)}</span>
+              {!isActive && (
+                <button onClick={handleReset} style={{ fontSize: 13, color: 'var(--text-light)', background: 'none', border: 'none', cursor: 'pointer', padding: '2px 6px', lineHeight: 1 }}>✕</button>
+              )}
+            </div>
+          </div>
+
+          {/* Progress / status section */}
+          <div style={{ padding: '14px 16px' }}>
+            {phase === 'uploading' && (
+              <>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+                  <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-muted)' }}>Uploading file…</span>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--amber)' }}>{uploadProgress}%</span>
+                </div>
+                <div style={{ height: 4, background: 'var(--border)', borderRadius: 2 }}>
+                  <div style={{ height: '100%', background: 'var(--amber)', borderRadius: 2, width: `${uploadProgress}%`, transition: 'width 0.3s' }} />
+                </div>
+              </>
+            )}
+
+            {phase === 'processing' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span className="spinning" style={{ color: 'var(--amber)' }}>◌</span>
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-muted)' }}>Processing with Claude…</div>
+                  <div style={{ fontSize: 11, fontWeight: 300, color: 'var(--text-light)', marginTop: 2 }}>Extracting text, preserving Gujarati Unicode and structure</div>
+                </div>
+              </div>
+            )}
+
+            {phase === 'done' && (
+              <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--green)' }}>✓ Text extracted successfully</div>
+            )}
+
+            {phase === 'error' && (
+              <>
+                <div style={{ fontSize: 12, color: 'var(--red)', marginBottom: 10 }}>{error}</div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button onClick={handleRetry} style={{ fontSize: 11, fontWeight: 600, color: 'var(--amber)', background: 'none', border: '1px solid var(--amber-border)', borderRadius: 4, padding: '5px 14px', cursor: 'pointer' }}>
+                    Retry
+                  </button>
+                  <button onClick={handleReset} style={{ fontSize: 11, fontWeight: 500, color: 'var(--text-light)', background: 'none', border: '1px solid var(--border)', borderRadius: 4, padding: '5px 14px', cursor: 'pointer' }}>
+                    Choose different file
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      <input ref={inputRef} type="file" accept={UPLOAD_ACCEPT} style={{ display: 'none' }} onChange={e => { const f = e.target.files?.[0]; if (f) startUpload(f); e.target.value = ''; }} />
     </div>
   );
 }

@@ -270,7 +270,7 @@ async function reviewerAgent(
   apiKey: string, original: string, translation: string,
 ): Promise<ReviewResult> {
   const raw = await callClaude({
-    model: 'claude-sonnet-4-20250514', max_tokens: 4096, apiKey,
+    model: 'claude-sonnet-4-20250514', max_tokens: 8192, apiKey,
     system: REVIEWER_SYSTEM,
     messages: [{ role: 'user', content: `ORIGINAL (Gujarati):\n${original}\n\nTRANSLATION TO REVIEW:\n${translation}\n\nReturn JSON:\n{"score": <integer 0-100>, "issues": ["issue 1", ...], "revised": "<corrected translation or identical if no changes>"}` }],
   });
@@ -340,12 +340,22 @@ export async function POST(req: NextRequest) {
       const send = (data: Record<string, unknown>) =>
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
 
+      // Keep the SSE connection alive during long Claude API calls.
+      // Vercel's proxy closes idle connections after ~20s with no data.
+      const keepalive = (fn: () => Promise<void>) => {
+        const interval = setInterval(() => {
+          try { controller.enqueue(encoder.encode(': keepalive\n\n')); } catch { /* stream closed */ }
+        }, 10000);
+        return fn().finally(() => clearInterval(interval));
+      };
+
       try {
         const context = chapterTitle ? ` — ${chapterTitle}` : '';
 
         // ── Stage 1: Chunker ───────────────────────────────────────────
         send({ stage: 'chunker', status: 'running' });
-        const chunks = await chunkerAgent(apiKey, text);
+        let chunks: string[] = [];
+        await keepalive(async () => { chunks = await chunkerAgent(apiKey, text); });
         send({ stage: 'chunker', status: 'done', count: chunks.length, chunks, context });
 
         // ── Stage 2: Translator (with cross-chunk memory) ──────────────
@@ -354,7 +364,8 @@ export async function POST(req: NextRequest) {
         let translationMemory = '';
 
         for (let i = 0; i < chunks.length; i++) {
-          const translation = await translatorAgent(apiKey, chunks[i], translationMemory, i, chunks.length);
+          let translation = '';
+          await keepalive(async () => { translation = await translatorAgent(apiKey, chunks[i], translationMemory, i, chunks.length); });
           translations.push(translation);
           send({ stage: 'translator', status: 'progress', current: i + 1, total: chunks.length, index: i, translation });
           // Update cross-chunk memory asynchronously (don't await — update on next chunk)
@@ -371,7 +382,8 @@ export async function POST(req: NextRequest) {
         const reviews: ReviewResult[] = [];
 
         for (let i = 0; i < chunks.length; i++) {
-          const review = await reviewerAgent(apiKey, chunks[i], translations[i]);
+          let review: ReviewResult = { score: 70, issues: [], revised: translations[i] };
+          await keepalive(async () => { review = await reviewerAgent(apiKey, chunks[i], translations[i]); });
           reviews.push(review);
           send({ stage: 'reviewer', status: 'progress', chunk: i + 1, total: chunks.length, index: i, score: review.score, issues: review.issues, revised: review.revised });
         }
@@ -384,7 +396,8 @@ export async function POST(req: NextRequest) {
         const smoothedChunks: string[] = [];
 
         for (let i = 0; i < reviews.length; i++) {
-          const smoothed = await smootherAgent(apiKey, reviews[i].revised);
+          let smoothed = '';
+          await keepalive(async () => { smoothed = await smootherAgent(apiKey, reviews[i].revised); });
           smoothedChunks.push(smoothed);
           send({ stage: 'smoother', status: 'progress', current: i + 1, total: reviews.length, index: i });
         }
@@ -392,7 +405,8 @@ export async function POST(req: NextRequest) {
 
         // ── Stage 5: Assembler ─────────────────────────────────────────
         send({ stage: 'assembler', status: 'running' });
-        const assembled = await assemblerAgent(apiKey, smoothedChunks);
+        let assembled = '';
+        await keepalive(async () => { assembled = await assemblerAgent(apiKey, smoothedChunks); });
         const finalWords = assembled.trim().split(/\s+/).length;
         send({ stage: 'assembler', status: 'done', output: assembled, wordCount: finalWords, avgScore: Math.round(avgScore) });
 

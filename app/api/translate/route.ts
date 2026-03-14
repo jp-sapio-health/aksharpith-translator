@@ -211,7 +211,9 @@ export async function POST(req: NextRequest) {
         send({ stage: 'assembler', status: 'done', output: assembled });
 
       } catch (e: unknown) {
-        send({ error: e instanceof Error ? e.message : 'Unknown error' });
+        const msg = e instanceof Error ? `${e.constructor.name}: ${e.message}` : String(e);
+        console.error('Pipeline error:', msg, e);
+        send({ error: msg });
       } finally {
         controller.close();
       }

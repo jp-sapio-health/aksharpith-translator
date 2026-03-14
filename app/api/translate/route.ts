@@ -204,7 +204,7 @@ export async function POST(req: NextRequest) {
     return new Response(JSON.stringify({ error: `Input too long (${wordCount} words). Please keep under 8,000 words.` }), { status: 400 });
   }
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
   if (!apiKey) {
     return new Response(JSON.stringify({ error: 'ANTHROPIC_API_KEY not set' }), { status: 500 });
   }

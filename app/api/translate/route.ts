@@ -325,8 +325,8 @@ export async function POST(req: NextRequest) {
   }
 
   const wordCount = text.trim().split(/\s+/).length;
-  if (wordCount > 10000) {
-    return new Response(JSON.stringify({ error: `Section too long (${wordCount} words). Please split into chapters of under 10,000 words each.` }), { status: 400 });
+  if (wordCount > 50000) {
+    return new Response(JSON.stringify({ error: `Section too long (${wordCount.toLocaleString()} words). Maximum is 50,000 words. Upload the full document and use book mode to process chapter by chapter.` }), { status: 400 });
   }
 
   const apiKey = process.env.ANTHROPIC_API_KEY?.trim();

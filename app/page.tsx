@@ -42,7 +42,8 @@ const SAMPLE = `પ્રેમે પ્રગટ્યા રે સૂરજ 
 
 સને 1781માં ત્રીજી એપ્રિલે, અયોધ્યા પાસે છપિયા ગામે ઉચ્ચ સરવરિયા બ્રાહ્મણ કુળમાં પ્રગટેલા આ અવતારી પુરુષે, બાળવયમાં જ તીવ્ર બુદ્ધિમત્તા, વિદ્વત્તા અને દિવ્યતાનો અસાધારણ અનુભવ કરાવ્યો; માત્ર 11 જ વર્ષની કુમળી વયે ગૃહત્યાગ કર્યો.`;
 
-const MAX_WORDS = 10000;
+const MAX_WORDS = 50000;
+const WARN_WORDS = 6000; // above this, timeout risk without book mode
 
 // ── Shared styles ──────────────────────────────────────────────────────────────
 
@@ -323,7 +324,11 @@ export default function Home() {
   const handleRun = async () => {
     if (!inputText.trim() || isRunning) return;
     if (words > MAX_WORDS) {
-      setPipelineError(`Input too long (${words.toLocaleString()} words). Split into chapters and use book mode, or keep under ${MAX_WORDS.toLocaleString()} words.`);
+      setPipelineError(`Input too long (${words.toLocaleString()} words). Maximum is ${MAX_WORDS.toLocaleString()} words.`);
+      return;
+    }
+    if (words > WARN_WORDS && !isBookMode) {
+      setPipelineError(`Warning: ${words.toLocaleString()} words may timeout on a single run (~${Math.round(words / 500 * 22 / 60)} min). Upload your document to enable book mode, which processes chapter by chapter.`);
       return;
     }
 
@@ -533,7 +538,7 @@ export default function Home() {
                     Load sample →
                   </button>
                   <div style={{ fontSize: 11, fontWeight: 400, color: words > MAX_WORDS ? 'var(--red)' : 'var(--text-light)' }}>
-                    {words.toLocaleString()} / {MAX_WORDS.toLocaleString()} words{words > MAX_WORDS ? ' — too long' : ''}
+                    {words.toLocaleString()} / {MAX_WORDS.toLocaleString()} words{words > MAX_WORDS ? ' — too long' : words > WARN_WORDS ? ' — use book mode' : ''}
                   </div>
                 </div>
               </>

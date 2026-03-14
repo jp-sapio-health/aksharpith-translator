@@ -81,9 +81,9 @@ const labelStyle: React.CSSProperties = {
 
 function scoreBadge(score: number | undefined, approved: boolean | undefined) {
   if (score === undefined) return null;
-  if (score >= 85)  return { cls: 'badge-strong',   label: approved ? 'Approved' : 'Strong' };
-  if (score >= 70)  return { cls: 'badge-adequate', label: 'Revised' };
-  return              { cls: 'badge-weak',     label: 'Weak' };
+  if (score >= 85)  return { cls: 'strong',   label: approved ? 'Approved' : 'Strong' };
+  if (score >= 70)  return { cls: 'adequate', label: 'Revised' };
+  return              { cls: 'weak',     label: 'Weak' };
 }
 
 // ── Stage Card ─────────────────────────────────────────────────────────────────

@@ -1,8 +1,62 @@
-import Anthropic from '@anthropic-ai/sdk';
+import https from 'node:https';
 import { NextRequest } from 'next/server';
 
 export const dynamic    = 'force-dynamic';
 export const maxDuration = 300;
+
+// ─── Raw Anthropic API helper ───────────────────────────────────────────────
+
+function callClaude(params: {
+  model: string;
+  max_tokens: number;
+  system: string;
+  messages: Array<{ role: string; content: string }>;
+  apiKey: string;
+}): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify({
+      model: params.model,
+      max_tokens: params.max_tokens,
+      system: params.system,
+      messages: params.messages,
+    });
+
+    const req = https.request(
+      {
+        hostname: 'api.anthropic.com',
+        path: '/v1/messages',
+        method: 'POST',
+        headers: {
+          'x-api-key': params.apiKey,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+          'content-length': Buffer.byteLength(body),
+        },
+      },
+      (res) => {
+        let raw = '';
+        res.on('data', (chunk) => { raw += chunk; });
+        res.on('end', () => {
+          if (res.statusCode && res.statusCode >= 400) {
+            reject(new Error(`Anthropic API ${res.statusCode}: ${raw}`));
+            return;
+          }
+          try {
+            const data = JSON.parse(raw) as { content: Array<{ type: string; text: string }> };
+            const text = data.content?.[0]?.type === 'text' ? data.content[0].text.trim() : '';
+            resolve(text);
+          } catch {
+            reject(new Error(`Failed to parse response: ${raw.slice(0, 200)}`));
+          }
+        });
+      },
+    );
+
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
 
 // ─── System prompts ────────────────────────────────────────────────────────────
 
@@ -43,10 +97,11 @@ Rules:
 
 // ─── Agent functions ───────────────────────────────────────────────────────────
 
-async function chunkerAgent(client: Anthropic, text: string): Promise<string[]> {
-  const msg = await client.messages.create({
+async function chunkerAgent(apiKey: string, text: string): Promise<string[]> {
+  const raw = await callClaude({
     model: 'claude-sonnet-4-20250514',
     max_tokens: 4096,
+    apiKey,
     system: 'You are a text splitter. Split the provided Gujarati text at natural paragraph boundaries into chunks of at most 500 words each. Never break a paragraph mid-sentence. Return ONLY valid JSON with no markdown fences.',
     messages: [{
       role: 'user',
@@ -56,7 +111,6 @@ Return JSON exactly as: {"chunks": ["chunk1 text", "chunk2 text", ...]}\n\nTEXT:
     }],
   });
 
-  const raw = msg.content[0].type === 'text' ? msg.content[0].text.trim() : '{"chunks":[]}';
   const jsonMatch = raw.match(/\{[\s\S]*\}/);
   if (!jsonMatch) return [text];
 
@@ -69,18 +123,17 @@ Return JSON exactly as: {"chunks": ["chunk1 text", "chunk2 text", ...]}\n\nTEXT:
   }
 }
 
-async function translatorAgent(client: Anthropic, chunk: string, styleContext: string): Promise<string> {
-  const msg = await client.messages.create({
+async function translatorAgent(apiKey: string, chunk: string, styleContext: string): Promise<string> {
+  return callClaude({
     model: 'claude-sonnet-4-20250514',
     max_tokens: 4096,
+    apiKey,
     system: TRANSLATION_SYSTEM,
     messages: [{
       role: 'user',
       content: `STYLE RULES (follow strictly):\n${styleContext}\n\n${'─'.repeat(60)}\n\nTranslate the following Gujarati text to English. Provide only the translation.\n\nGUJARATI:\n${chunk}`,
     }],
   });
-
-  return msg.content[0].type === 'text' ? msg.content[0].text.trim() : '';
 }
 
 interface ReviewResult {
@@ -90,14 +143,15 @@ interface ReviewResult {
 }
 
 async function reviewerAgent(
-  client: Anthropic,
+  apiKey: string,
   original: string,
   translation: string,
   styleContext: string,
 ): Promise<ReviewResult> {
-  const msg = await client.messages.create({
+  const raw = await callClaude({
     model: 'claude-sonnet-4-20250514',
     max_tokens: 4096,
+    apiKey,
     system: REVIEWER_SYSTEM,
     messages: [{
       role: 'user',
@@ -105,7 +159,6 @@ async function reviewerAgent(
     }],
   });
 
-  const raw = msg.content[0].type === 'text' ? msg.content[0].text.trim() : '{}';
   const jsonMatch = raw.match(/\{[\s\S]*\}/);
   if (!jsonMatch) return { score: 70, issues: [], revised: translation };
 
@@ -121,11 +174,12 @@ async function reviewerAgent(
   }
 }
 
-async function assemblerAgent(client: Anthropic, revisedChunks: string[]): Promise<string> {
+async function assemblerAgent(apiKey: string, revisedChunks: string[]): Promise<string> {
   const combined = revisedChunks.join('\n\n');
-  const msg = await client.messages.create({
+  return callClaude({
     model: 'claude-sonnet-4-20250514',
     max_tokens: 16000,
+    apiKey,
     system: ASSEMBLER_SYSTEM,
     messages: [{
       role: 'user',
@@ -133,8 +187,6 @@ async function assemblerAgent(client: Anthropic, revisedChunks: string[]): Promi
 Ensure smooth transitions and unified tone. Output only the final document.\n\n${combined}`,
     }],
   });
-
-  return msg.content[0].type === 'text' ? msg.content[0].text.trim() : combined;
 }
 
 // ─── Route handler ─────────────────────────────────────────────────────────────
@@ -157,7 +209,6 @@ export async function POST(req: NextRequest) {
     return new Response(JSON.stringify({ error: 'ANTHROPIC_API_KEY not set' }), { status: 500 });
   }
 
-  const client  = new Anthropic({ apiKey });
   const encoder = new TextEncoder();
 
   const stream = new ReadableStream({
@@ -169,7 +220,7 @@ export async function POST(req: NextRequest) {
       try {
         // ── Chunker ──────────────────────────────────────────────────
         send({ stage: 'chunker', status: 'running' });
-        const chunks = await chunkerAgent(client, text);
+        const chunks = await chunkerAgent(apiKey, text);
         send({ stage: 'chunker', status: 'done', count: chunks.length, chunks });
 
         // ── Translator ───────────────────────────────────────────────
@@ -177,7 +228,7 @@ export async function POST(req: NextRequest) {
         const translations: string[] = [];
 
         for (let i = 0; i < chunks.length; i++) {
-          const translation = await translatorAgent(client, chunks[i], styleContext ?? '');
+          const translation = await translatorAgent(apiKey, chunks[i], styleContext ?? '');
           translations.push(translation);
           send({
             stage: 'translator', status: 'progress',
@@ -192,7 +243,7 @@ export async function POST(req: NextRequest) {
         const reviews: ReviewResult[] = [];
 
         for (let i = 0; i < chunks.length; i++) {
-          const review = await reviewerAgent(client, chunks[i], translations[i], styleContext ?? '');
+          const review = await reviewerAgent(apiKey, chunks[i], translations[i], styleContext ?? '');
           reviews.push(review);
           send({
             stage: 'reviewer', status: 'progress',
@@ -207,11 +258,11 @@ export async function POST(req: NextRequest) {
         // ── Assembler ────────────────────────────────────────────────
         send({ stage: 'assembler', status: 'running' });
         const revisedTexts = reviews.map(r => r.revised);
-        const assembled    = await assemblerAgent(client, revisedTexts);
+        const assembled    = await assemblerAgent(apiKey, revisedTexts);
         send({ stage: 'assembler', status: 'done', output: assembled });
 
       } catch (e: unknown) {
-        const msg = e instanceof Error ? `${e.constructor.name}: ${e.message}` : String(e);
+        const msg = e instanceof Error ? e.message : 'Unknown error';
         console.error('Pipeline error:', msg, e);
         send({ error: msg });
       } finally {

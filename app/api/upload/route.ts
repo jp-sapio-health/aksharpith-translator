@@ -54,6 +54,59 @@ function callClaudeWithDoc(apiKey: string, base64: string, prompt: string): Prom
   });
 }
 
+// ── Claude-based chapter detection ────────────────────────────────────────────
+
+async function detectChapters(
+  apiKey: string,
+  text: string,
+): Promise<Array<{ title: string; startLine: number }>> {
+  // Pass the first 3,000 chars (TOC + opening) and the line index to Claude
+  const lines = text.split('\n');
+  const sample = lines.slice(0, 250).map((l, i) => `${i}: ${l}`).join('\n');
+
+  const raw = await callClaudeSimple(apiKey, {
+    system: 'You are a document structure analyser. Given the opening lines of a Gujarati book with line numbers, identify the main chapter or section headings and the line number where each begins. Return ONLY valid JSON — no markdown fences.',
+    user: `Find all chapter/section headings in this document opening. These may be in Gujarati, Sanskrit, or English. Look for table-of-contents entries, numbered sections, or standalone heading lines.\n\nReturn JSON exactly as:\n{"chapters": [{"title": "chapter title", "startLine": <line number>}, ...]}\n\nIf no clear chapters found, return {"chapters": []}\n\nDOCUMENT OPENING (with line numbers):\n${sample}`,
+    max_tokens: 1024,
+  });
+
+  const match = raw.match(/\{[\s\S]*\}/);
+  if (!match) return [];
+  try {
+    const parsed = JSON.parse(match[0]) as { chapters: Array<{ title: string; startLine: number }> };
+    return Array.isArray(parsed.chapters) ? parsed.chapters.filter(c => c.title && typeof c.startLine === 'number') : [];
+  } catch {
+    return [];
+  }
+}
+
+function callClaudeSimple(apiKey: string, params: { system: string; user: string; max_tokens: number }): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: params.max_tokens,
+      system: params.system,
+      messages: [{ role: 'user', content: params.user }],
+    });
+    const req = https.request({
+      hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
+      headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
+    }, (res) => {
+      let raw = '';
+      res.on('data', c => { raw += c; });
+      res.on('end', () => {
+        try {
+          const data = JSON.parse(raw) as { content: Array<{ type: string; text: string }> };
+          resolve(data.content?.[0]?.text?.trim() ?? '');
+        } catch { resolve(''); }
+      });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
 export async function POST(req: NextRequest) {
   try {
     const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
@@ -87,18 +140,8 @@ export async function POST(req: NextRequest) {
       return Response.json({ error: 'No text could be extracted. The document may be image-based or empty.' }, { status: 422 });
     }
 
-    // Chapter detection
-    const lines = extracted.split('\n');
-    const chapterRe = /^(===\s*CHAPTER:.*===|chapter\s+\d+|પ્રકરણ\s*\d+|\d+\.\s+\S)/i;
-    const chapters: Array<{ title: string; startLine: number }> = [];
-    lines.forEach((line, i) => {
-      if (chapterRe.test(line.trim())) {
-        chapters.push({
-          title:     line.trim().replace(/^===\s*CHAPTER:\s*/, '').replace(/\s*===$/, ''),
-          startLine: i,
-        });
-      }
-    });
+    // Chapter detection — ask Claude to identify chapter boundaries
+    const chapters = await detectChapters(apiKey, extracted);
 
     const wordCount = extracted.trim().split(/\s+/).length;
 

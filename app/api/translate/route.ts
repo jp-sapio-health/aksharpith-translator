@@ -125,7 +125,7 @@ async function assemblerAgent(client: Anthropic, revisedChunks: string[]): Promi
   const combined = revisedChunks.join('\n\n');
   const msg = await client.messages.create({
     model: 'claude-sonnet-4-20250514',
-    max_tokens: 8192,
+    max_tokens: 16000,
     system: ASSEMBLER_SYSTEM,
     messages: [{
       role: 'user',
@@ -145,6 +145,11 @@ export async function POST(req: NextRequest) {
 
   if (!text?.trim()) {
     return new Response(JSON.stringify({ error: 'No text provided' }), { status: 400 });
+  }
+
+  const wordCount = text.trim().split(/\s+/).length;
+  if (wordCount > 8000) {
+    return new Response(JSON.stringify({ error: `Input too long (${wordCount} words). Please keep under 8,000 words.` }), { status: 400 });
   }
 
   const apiKey = process.env.ANTHROPIC_API_KEY;

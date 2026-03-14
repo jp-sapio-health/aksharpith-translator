@@ -73,6 +73,12 @@ OUTPUT: Return ONLY the translated English text. No preamble, no compliance note
 function wc(t: string) { return t.trim() ? t.trim().split(/\s+/).length : 0; }
 function estimateChunks(t: string) { return Math.ceil(wc(t) / 500) || 0; }
 
+const MAX_WORDS = 8000;
+
+const labelStyle: React.CSSProperties = {
+  fontSize: 10, fontWeight: 600, letterSpacing: 2, textTransform: 'uppercase', color: 'var(--text-light)', marginBottom: 8,
+};
+
 function scoreBadge(score: number | undefined, approved: boolean | undefined) {
   if (score === undefined) return null;
   if (score >= 85)  return { cls: 'badge-strong',   label: approved ? 'Approved' : 'Strong' };
@@ -230,6 +236,10 @@ export default function Home() {
 
   const handleRun = async () => {
     if (!inputText.trim() || isRunning) return;
+    if (wc(inputText) > MAX_WORDS) {
+      setPipelineError(`Input too long (${wc(inputText).toLocaleString()} words). Please keep under ${MAX_WORDS.toLocaleString()} words to avoid timeouts.`);
+      return;
+    }
 
     setStages(INITIAL_STAGES);
     setChunks([]);
@@ -372,19 +382,13 @@ export default function Home() {
   const words  = wc(inputText);
   const nchunks = estimateChunks(inputText);
 
-  // ── Styles ────────────────────────────────────────────────────────────────────
-
-  const labelStyle: React.CSSProperties = {
-    fontSize: 10, fontWeight: 600, letterSpacing: 2, textTransform: 'uppercase', color: 'var(--text-light)', marginBottom: 8,
-  };
-
   // ── Render ────────────────────────────────────────────────────────────────────
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
 
       {/* Header */}
-      <header style={{ background: 'var(--bg-white)', borderBottom: '1px solid var(--border)', position: 'sticky', top: 0, zIndex: 100, padding: '14px 20px' }}>
+      <header ref={el => { if (el) document.documentElement.style.setProperty('--header-h', el.offsetHeight + 'px'); }} style={{ background: 'var(--bg-white)', borderBottom: '1px solid var(--border)', position: 'sticky', top: 0, zIndex: 100, padding: '14px 20px' }}>
         <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: 3, textTransform: 'uppercase', color: 'var(--text-light)', marginBottom: 2 }}>
           BAPS Swaminarayan · Aksharpith
         </div>
@@ -394,7 +398,7 @@ export default function Home() {
       </header>
 
       {/* Tabs */}
-      <div style={{ display: 'flex', background: 'var(--bg-white)', borderBottom: '1px solid var(--border)', position: 'sticky', top: 67, zIndex: 99 }}>
+      <div style={{ display: 'flex', background: 'var(--bg-white)', borderBottom: '1px solid var(--border)', position: 'sticky', top: 'var(--header-h, 67px)', zIndex: 99 }}>
         {(['input', 'pipeline', 'output'] as Tab[]).map(t => (
           <button
             key={t}
@@ -433,8 +437,9 @@ export default function Home() {
                 marginTop: 8,
               }}
             />
-            <div style={{ fontSize: 11, fontWeight: 400, color: 'var(--text-light)', textAlign: 'right', marginTop: 8 }}>
-              {words.toLocaleString()} words · {nchunks} chunk{nchunks !== 1 ? 's' : ''}
+            <div style={{ fontSize: 11, fontWeight: 400, color: words > MAX_WORDS ? 'var(--red)' : 'var(--text-light)', textAlign: 'right', marginTop: 8 }}>
+              {words.toLocaleString()} / {MAX_WORDS.toLocaleString()} words · {nchunks} chunk{nchunks !== 1 ? 's' : ''}
+              {words > MAX_WORDS && ' — too long'}
             </div>
           </div>
 
@@ -494,6 +499,13 @@ export default function Home() {
       {/* ── PIPELINE TAB ── */}
       {tab === 'pipeline' && (
         <div style={{ padding: '24px 20px', display: 'flex', flexDirection: 'column', gap: 0, maxWidth: 780, margin: '0 auto', width: '100%' }}>
+
+          {/* Error banner */}
+          {pipelineError && (
+            <div style={{ background: 'var(--red-bg)', border: '1px solid var(--red-border)', borderRadius: 'var(--radius)', padding: '14px 18px', fontSize: 13, color: 'var(--red)', fontWeight: 300, marginBottom: 20 }}>
+              <strong style={{ fontWeight: 600 }}>Error: </strong>{pipelineError}
+            </div>
+          )}
 
           {/* Stage cards */}
           {stages.map((stage, i) => (

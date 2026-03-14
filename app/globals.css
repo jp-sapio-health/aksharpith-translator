@@ -1,0 +1,98 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --bg: #0A0806;
+  --surface: #141008;
+  --card: #1C1510;
+  --border: #2A1E14;
+  --border-active: #D4922A;
+  --border-done: #2A4A2E;
+  --border-error: #5A1E1E;
+  --gold: #D4922A;
+  --gold-light: #E8A84A;
+  --cream: #F2E8D4;
+  --cream-dim: #C8B898;
+  --muted: #8A7A66;
+  --very-muted: #3A2C1E;
+  --sage: #6B9E74;
+}
+
+html, body {
+  background-color: var(--bg);
+  color: var(--cream);
+  font-family: 'Lora', serif;
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 3px; height: 3px; }
+::-webkit-scrollbar-track { background: var(--surface); }
+::-webkit-scrollbar-thumb { background: var(--very-muted); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: var(--gold); }
+
+/* Textarea / Input base */
+textarea, input {
+  font-family: inherit;
+  background: var(--surface);
+  color: var(--cream);
+  border: 1px solid var(--border);
+  outline: none;
+  transition: border-color 0.2s;
+  border-radius: 0;
+}
+textarea:focus, input:focus {
+  border-color: var(--gold);
+}
+textarea::placeholder {
+  color: var(--very-muted);
+}
+
+/* Spin */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+.spin {
+  animation: spin 0.9s linear infinite;
+}
+
+/* Pulse dot */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.7); }
+}
+.pulse-dot {
+  animation: pulse-dot 1.4s ease-in-out infinite;
+}
+
+/* Fade in up */
+@keyframes fade-in-up {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.fade-in-up {
+  animation: fade-in-up 0.35s ease-out forwards;
+}
+
+/* Shimmer for running cards */
+@keyframes shimmer-border {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(212, 146, 42, 0); }
+  50% { box-shadow: 0 0 18px 0 rgba(212, 146, 42, 0.18); }
+}
+.shimmer-border {
+  animation: shimmer-border 2s ease-in-out infinite;
+}
+
+/* Score ring */
+@keyframes score-fill {
+  from { stroke-dashoffset: 100; }
+}

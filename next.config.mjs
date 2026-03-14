@@ -1,6 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  serverExternalPackages: ['@anthropic-ai/sdk', 'mammoth'],
+  serverExternalPackages: ['mammoth'],
 };
 
 export default nextConfig;

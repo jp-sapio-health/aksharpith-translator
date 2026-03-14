@@ -2,7 +2,7 @@
 
 ## Overview
 
-A Next.js 15 web application that translates Gujarati religious/biographical text into publication-ready English using a five-stage agentic pipeline powered by the Anthropic Claude API. The pipeline runs server-side and streams real-time progress events to the browser via Server-Sent Events (SSE). Accepts paste, PDF, DOCX, or TXT input — including entire books via automatic chapter detection and sequential book-mode processing.
+A Next.js 15 web application that translates Gujarati religious/biographical text into publication-ready English using a **six-stage agentic pipeline** powered by the Anthropic Claude API. The pipeline runs server-side and streams real-time progress events to the browser via Server-Sent Events (SSE). Accepts paste, PDF, DOCX, DOC, TXT, and image (PNG/JPG/WEBP/GIF) input — including entire books via automatic chapter detection and sequential book-mode processing.
 
 ---
 
@@ -10,23 +10,24 @@ A Next.js 15 web application that translates Gujarati religious/biographical tex
 
 ```
 GitHub:  https://github.com/jp-sapio-health/aksharpith-translator
-Vercel:  https://web-six-sable-1118tqf2jy.vercel.app
+Vercel:  https://aksharpith-translate.vercel.app
+Deploy:  Automatic — push to main triggers Vercel production deploy
 ```
 
 ---
 
 ## Stack
 
-| Layer       | Technology                                          |
-|-------------|-----------------------------------------------------|
-| Framework   | Next.js 15 (App Router)                             |
-| Language    | TypeScript 5                                        |
-| Styling     | Inline React styles + CSS variables (no Tailwind dependency at runtime) |
-| HTTP        | Node.js native `https` module (no SDK — bypasses Next.js fetch patching) |
-| File parsing | `mammoth` (DOCX) · Claude PDF vision (PDF → Unicode) |
-| Hosting     | Vercel (serverless, 300s Pro timeout)               |
-| Runtime     | Node.js                                             |
-| Fonts       | Cormorant Garamond + Karla (Google Fonts)           |
+| Layer        | Technology                                                     |
+|--------------|----------------------------------------------------------------|
+| Framework    | Next.js 15 (App Router)                                        |
+| Language     | TypeScript 5                                                   |
+| Styling      | Inline React styles + CSS custom properties (no CSS framework) |
+| HTTP         | Node.js native `https` module (no SDK — bypasses Next.js fetch patching) |
+| File parsing | `mammoth` (DOCX) · Claude PDF vision · Claude image OCR       |
+| Hosting      | Vercel (serverless, 300s Pro timeout)                          |
+| Runtime      | Node.js                                                        |
+| Fonts        | Cormorant Garamond + Karla (Google Fonts)                      |
 
 ---
 
@@ -36,17 +37,17 @@ Vercel:  https://web-six-sable-1118tqf2jy.vercel.app
 web/
 ├── app/
 │   ├── layout.tsx                  # Root layout — font imports, metadata, viewport
-│   ├── page.tsx                    # Main UI — all state, SSE reader, book-mode orchestrator
-│   ├── globals.css                 # CSS variables (warm palette), keyframe animations
+│   ├── page.tsx                    # Main UI — 6 pipeline stages, file upload, chunk cards
+│   ├── globals.css                 # CSS variables (light theme), keyframe animations
 │   └── api/
 │       ├── upload/
-│       │   └── route.ts            # POST — accepts PDF/DOCX/TXT, returns extracted text + chapters
+│       │   └── route.ts            # POST — PDF/DOCX/DOC/TXT/image extraction + chapter detection
 │       └── translate/
-│           └── route.ts            # POST — runs 5-agent pipeline, streams SSE
-├── next.config.mjs                 # serverExternalPackages: [@anthropic-ai/sdk, mammoth]
-├── vercel.json                     # maxDuration: 300s for /api/translate
+│           └── route.ts            # POST — 6-agent pipeline, streams SSE
+├── next.config.mjs                 # serverExternalPackages: [mammoth]
 ├── .env.local                      # ANTHROPIC_API_KEY (gitignored)
-└── package.json                    # mammoth added; @anthropic-ai/sdk kept as dep but not used at runtime
+├── package.json                    # mammoth, next, react
+└── ARCHITECTURE.md                 # This file
 ```
 
 ---
@@ -57,24 +58,24 @@ Three authoritative documents are baked into the system prompts as immutable con
 
 | Document | Role | How used |
 |----------|------|----------|
-| `Aksharpith House Rules - 1.pdf` | Master editorial + translation rules | Embedded in full in `TRANSLATOR_SYSTEM` and `REVIEWER_SYSTEM` |
-| `Master Glossary - New - 06-11-25.pdf` | ~200 canonical theological term definitions | Key terms embedded in `KEY_GLOSSARY` constant |
-| `Examples and Lessons from BAPS Translations.docx` | 79+ before/after correction examples | Critical corrections listed in `REVIEWER_SYSTEM` |
+| `Aksharpith House Rules - 1.pdf` | Master editorial + translation rules | Embedded in `TRANSLATOR_SYSTEM`, `REVIEWER1_SYSTEM`, `REVIEWER2_SYSTEM` |
+| `Master Glossary - New - 06-11-25.pdf` | ~200 canonical theological term definitions | Key terms in `KEY_GLOSSARY` constant |
+| `Examples and Lessons from BAPS Translations.docx` | 79+ before/after correction examples | Critical corrections in `REVIEWER2_SYSTEM` |
 
-A fourth document (`GOLD STANDARD PROMPTS.docx`) provided the four prompt templates that shaped each agent's instructions:
+A fourth document (`GOLD STANDARD PROMPTS.docx`) provided the prompt templates that shaped each agent's instructions:
 
 | Prompt | Mapped to |
 |--------|-----------|
-| Prompt 1 — Context initialisation | CHUNKER_SYSTEM (structural setup) |
-| Prompt 2 — "Trustee of tradition" mindset | TRANSLATOR_SYSTEM |
-| Prompt 3 — Per-chunk translation with glossary cross-reference | Translator user message |
-| Prompt 4 — Readability pass (never alters meaning) | SMOOTHER_SYSTEM |
+| Prompt 1 — Context initialisation | `CHUNKER_SYSTEM` |
+| Prompt 2 — "Trustee of tradition" mindset | `TRANSLATOR_SYSTEM` |
+| Prompt 3 — Per-chunk translation with glossary | Translator user message |
+| Prompt 4 — Readability pass | `SMOOTHER_SYSTEM` |
 
 ---
 
 ## Pipeline Architecture
 
-### Single Section Mode
+### Six-Agent Pipeline
 
 ```
 Browser (page.tsx)
@@ -87,103 +88,76 @@ Browser (page.tsx)
 │  Next.js API Route  (app/api/translate/route.ts)             │
 │                                                              │
 │  ReadableStream ──► text/event-stream ──► Browser            │
+│  Keepalive pings every 10s to prevent Vercel idle timeout    │
 │                                                              │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │  01. CHUNKER                                         │   │
-│  │  Model: claude-sonnet-4-20250514                     │   │
-│  │  Input:  raw Gujarati text                           │   │
-│  │  Output: string[] — ≤500-word chunks at paragraph    │   │
-│  │          and verse boundaries                        │   │
+│  │  Splits text at paragraph/verse boundaries ≤500 words │   │
 │  └───────────────────────┬──────────────────────────────┘   │
 │                          │ chunks[]                          │
 │                          ▼                                   │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │  02. TRANSLATOR                                      │   │
-│  │  Model: claude-sonnet-4-20250514                     │   │
-│  │  System: TRANSLATOR_SYSTEM                           │   │
-│  │    → Full house rules (British English, diacritics   │   │
-│  │      policy, mandatory terminology, tone rules)      │   │
-│  │    → Full key glossary (~50 canonical terms)         │   │
-│  │    → "Trustee of tradition" Gold Standard Prompt 2   │   │
-│  │  Input:  chunk + running translation memory          │   │
-│  │  Output: English translation                         │   │
-│  │  Loop:   sequential; memory updated after each chunk │   │
+│  │  Full house rules + glossary + translation memory     │   │
+│  │  Sequential; cross-chunk memory via Haiku extractor   │   │
 │  └───────────────────────┬──────────────────────────────┘   │
-│            ↕ memory      │ translations[]                    │
-│  ┌─────────────────────┐ │                                   │
-│  │ MEMORY EXTRACTOR    │ │                                   │
-│  │ Model: claude-haiku │ │                                   │
-│  │ Extracts proper noun│ │                                   │
-│  │ decisions after each│ │                                   │
-│  │ chunk for next run  │ │                                   │
-│  └─────────────────────┘ │                                   │
+│                          │ translations[]                    │
 │                          ▼                                   │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │  03. REVIEWER                                        │   │
-│  │  Model: claude-sonnet-4-20250514                     │   │
-│  │  System: REVIEWER_SYSTEM                             │   │
-│  │    → All house rules                                 │   │
-│  │    → 79+ explicit before/after correction examples   │   │
-│  │      (mandir not temple, Swami not saint, etc.)      │   │
-│  │  Input:  original Gujarati + English translation     │   │
-│  │  Output: { score: 0–100, issues: string[],           │   │
-│  │            revised: string }                         │   │
+│  │  03. CERTIFICATION AUDIT  (Reviewer 1)               │   │
+│  │  BAPS Translation Certification Checklist:            │   │
+│  │    8 categories (Terminology, Punctuation, Diacritics,│   │
+│  │    Tone, Fidelity, Verse Handling, Historical,        │   │
+│  │    Completeness) + 20 Common Pitfalls diagnostic      │   │
+│  │  Output: per-category pass/fail, certifiable flag,    │   │
+│  │          corrected revised text                       │   │
 │  └───────────────────────┬──────────────────────────────┘   │
-│                          │ reviewed[]                        │
+│                          │ reviewer1Results[]                │
 │                          ▼                                   │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │  04. SMOOTHER  (Gold Standard Prompt 4)              │   │
-│  │  Model: claude-sonnet-4-20250514                     │   │
-│  │  Input:  reviewed/revised translation per chunk      │   │
-│  │  Rules:  smooth flow, natural transitions,           │   │
-│  │          restructure long sentences                  │   │
-│  │  Hard constraints: never alter quotes, verses,       │   │
-│  │          proper nouns, dates, numbers                │   │
+│  │  04. STYLE REVIEW  (Reviewer 2)                      │   │
+│  │  House-style rules + 79+ before/after corrections     │   │
+│  │  Input: Reviewer 1's corrected text (double pass)     │   │
+│  │  Output: { score: 0–100, issues[], revised }          │   │
+│  └───────────────────────┬──────────────────────────────┘   │
+│                          │ reviews[]                         │
+│                          ▼                                   │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │  05. SMOOTHER  (Gold Standard Prompt 4)              │   │
+│  │  Readability pass — natural flow, transitions         │   │
+│  │  Never alters quotes, verses, nouns, dates, numbers   │   │
 │  └───────────────────────┬──────────────────────────────┘   │
 │                          │ smoothed[]                        │
 │                          ▼                                   │
 │  ┌──────────────────────────────────────────────────────┐   │
-│  │  05. ASSEMBLER                                       │   │
-│  │  Model: claude-sonnet-4-20250514                     │   │
-│  │  max_tokens: 16,000                                  │   │
-│  │  Input:  all smoothed chunks joined                  │   │
-│  │  Output: single coherent publication-ready document  │   │
-│  │  Skipped if only 1 chunk (returned directly)         │   │
+│  │  06. ASSEMBLER                                       │   │
+│  │  Joins all chunks into single publication-ready doc   │   │
+│  │  Skipped if only 1 chunk (returned directly)          │   │
 │  └──────────────────────────────────────────────────────┘   │
 │                                                              │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-### Book Mode (whole-book orchestration)
+### Book Mode
 
 ```
-Browser (page.tsx) — orchestrates across multiple API calls
-
-  Upload PDF/DOCX
-        │
-        ▼
-  POST /api/upload
-  → Claude PDF vision extracts Unicode text (handles Gujarati fonts)
-  → Chapter detection via heading patterns
-  → Returns: { text, chapters[], isBookMode }
-        │
-        ▼
-  For each chapter (sequential):
-        │
-        ├─► POST /api/translate { text: chapterText, chapterTitle }
-        │   → Full 5-agent pipeline
-        │   → Returns output via SSE
-        │
-        ├─► Chapter result stored in bookOutputs[]
-        ├─► Chapter bar progress updated
-        └─► Next chapter...
-
-  Final: all chapter outputs joined → displayed as single document
+Upload PDF/DOCX/image
+      │
+      ▼
+POST /api/upload
+  → Claude PDF vision / image OCR / mammoth extraction
+  → Chapter detection (headings → TOC rejection → word-count fallback)
+  → Returns { text, chapters[], isBookMode }
+      │
+      ▼
+For each chapter (sequential):
+  → POST /api/translate { text, chapterTitle }
+  → Full 6-agent pipeline per chapter
+  → Chapter bar progress updated in real-time
+      │
+      ▼
+All chapter outputs joined → displayed as single document
 ```
-
-### Cross-Chunk Translation Memory
-
-After each translated chunk, a lightweight Haiku call extracts proper noun and term decisions (e.g. "• ગઢડા → Gadhada") and appends them to a running memory string (capped at 2,000 chars). This memory is prepended to every subsequent translator call, ensuring consistency across a long document without requiring a shared session.
 
 ---
 
@@ -192,17 +166,22 @@ After each translated chunk, a lightweight Haiku call extracts proper noun and t
 ```typescript
 // Chunker
 { stage: 'chunker', status: 'running' }
-{ stage: 'chunker', status: 'done', count: number, chunks: string[], context: string }
+{ stage: 'chunker', status: 'done', count: number, chunks: string[] }
 
 // Translator
 { stage: 'translator', status: 'running' }
 { stage: 'translator', status: 'progress', current: number, total: number, index: number, translation: string }
 { stage: 'translator', status: 'done', memorySize: number }
 
-// Reviewer
-{ stage: 'reviewer', status: 'running' }
-{ stage: 'reviewer', status: 'progress', chunk: number, total: number, index: number, score: number, issues: string[], revised: string }
-{ stage: 'reviewer', status: 'done', avgScore: number }
+// Reviewer 1 (Certification Audit)
+{ stage: 'reviewer1', status: 'running' }
+{ stage: 'reviewer1', status: 'progress', chunk: number, total: number, index: number, categories: Category[], pitfalls: string[], score: number, certifiable: boolean }
+{ stage: 'reviewer1', status: 'done', certCount: number, total: number }
+
+// Reviewer 2 (Style Review)
+{ stage: 'reviewer2', status: 'running' }
+{ stage: 'reviewer2', status: 'progress', chunk: number, total: number, index: number, score: number, issues: string[], revised: string }
+{ stage: 'reviewer2', status: 'done', avgScore: number }
 
 // Smoother
 { stage: 'smoother', status: 'running' }
@@ -221,77 +200,44 @@ After each translated chunk, a lightweight Haiku call extracts proper noun and t
 
 ## Model Allocation
 
-| Agent            | Model                       | Max Tokens | Rationale |
-|------------------|-----------------------------|------------|-----------|
-| Chunker          | claude-sonnet-4-20250514    | 4,096      | Lightweight JSON structural task |
-| Translator       | claude-sonnet-4-20250514    | 4,096      | Full gold standard context injection |
-| Memory Extractor | claude-haiku-4-5-20251001   | 512        | Lightweight; fire-and-forget |
-| Reviewer         | claude-sonnet-4-20250514    | 4,096      | Structured JSON + correction rules |
-| Smoother         | claude-sonnet-4-20250514    | 8,192      | Readability pass per chunk |
-| Assembler        | claude-sonnet-4-20250514    | 16,000     | Full-document join |
-| PDF Extractor    | claude-sonnet-4-20250514    | 8,192      | Native document vision for PDFs |
+| Agent               | Model                     | Max Tokens | Rationale |
+|---------------------|---------------------------|------------|-----------|
+| Chunker             | claude-sonnet-4-20250514  | 4,096      | Lightweight JSON structural task |
+| Translator          | claude-sonnet-4-20250514  | 4,096      | Full gold standard context injection |
+| Memory Extractor    | claude-haiku-4-5-20251001 | 512        | Lightweight; fire-and-forget |
+| Reviewer 1 (Cert)   | claude-sonnet-4-20250514  | 8,192      | 8-category checklist + revised text |
+| Reviewer 2 (Style)  | claude-sonnet-4-20250514  | 8,192      | Structured JSON + 79 corrections |
+| Smoother            | claude-sonnet-4-20250514  | 8,192      | Readability pass per chunk |
+| Assembler           | claude-sonnet-4-20250514  | 16,000     | Full-document join |
+| PDF Extractor       | claude-sonnet-4-20250514  | 32,000     | Multi-page PDF vision (up to 100 pages) |
+| Image OCR           | claude-sonnet-4-20250514  | 32,000     | Claude vision for PNG/JPG/WEBP/GIF |
 
 ---
 
-## File Upload Flow
+## File Upload
 
 ```
-Browser: drag-drop or file picker (PDF / DOCX / TXT)
+Browser: drag-drop or file picker
+         PDF · DOCX · DOC · TXT · PNG · JPG · WEBP · GIF
+         Up to 100 MB
       │
-      │  POST /api/upload  (multipart/form-data)
+      │  XHR with upload progress tracking
+      │  Phase 1: "Uploading 67%..." (file transfer)
+      │  Phase 2: "Processing with Claude..." (text extraction)
       ▼
-┌─────────────────────────────────────────────────┐
-│  app/api/upload/route.ts                        │
-│                                                 │
-│  .pdf  → Claude vision (base64 document)        │
-│          Prompt: extract all text, mark         │
-│          chapters as "=== CHAPTER: title ==="   │
-│          Handles Gujarati Unicode correctly      │
-│                                                 │
-│  .docx → mammoth.extractRawText()               │
-│                                                 │
-│  .txt  → Buffer.toString('utf-8')               │
-│                                                 │
-│  Returns: {                                     │
-│    text: string,                                │
-│    filename: string,                            │
-│    wordCount: number,                           │
-│    chapters: { title, startLine }[] | null,     │
-│    isBookMode: wordCount > 3000                 │
-│  }                                              │
-└─────────────────────────────────────────────────┘
-```
-
----
-
-## Client State Machine
-
-```
-idle
- │
- ├─► [Run clicked]
- │     → validate word count (≤10,000 per section)
- │     → isRunning = true, reset state, setTab('pipeline')
- │
- │   if book mode (chapters detected):
- │   │
- │   │   for each chapter (i = 0..N):
- │   │     → setCurrentChapterIdx(i)
- │   │     → bookChapters[i].status = 'running'
- │   │     → runSection(chapterText, chapterTitle)
- │   │         → SSE stream (same event handling as single mode)
- │   │     → bookChapters[i].status = 'done' | 'error'
- │   │     → bookOutputs[i] = result.output
- │   │
- │   │   → combine all outputs → setOutput()
- │   │   → setTab('output')
- │   │
- │   else (single section):
- │     → runSection(inputText)
- │     → setOutput(result.output)
- │     → setTab('output')
- │
- └─► isRunning = false
+┌───────────────────────────────────────────────────────┐
+│  app/api/upload/route.ts  (maxDuration: 120s)         │
+│                                                       │
+│  .pdf   → Claude PDF vision (base64, max 32MB)        │
+│  .png/.jpg/.webp/.gif → Claude image OCR (max 20MB)   │
+│  .docx  → mammoth.extractRawText()                    │
+│  .doc   → mammoth attempt, graceful fallback           │
+│  .txt   → Buffer.toString('utf-8')                    │
+│                                                       │
+│  → Chapter detection                                  │
+│  → Returns { text, filename, wordCount, chapters,     │
+│              isBookMode }                             │
+└───────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -300,9 +246,7 @@ idle
 
 | Variable            | Required | Description                               |
 |---------------------|----------|-------------------------------------------|
-| `ANTHROPIC_API_KEY` | Yes      | Set in Vercel dashboard + `.env.local`    |
-
-Note: the key must be trimmed of whitespace — the route calls `.trim()` before use.
+| `ANTHROPIC_API_KEY` | Yes      | Set in Vercel dashboard + `.env.local`. Trimmed of whitespace at runtime. |
 
 ---
 
@@ -312,15 +256,16 @@ Note: the key must be trimmed of whitespace — the route calls `.trim()` before
 Platform:   Vercel (serverless)
 Build cmd:  next build
 Region:     Auto
+Deploy:     Automatic on git push to main
 
-Function timeouts (vercel.json):
+Function timeouts:
   /api/translate  → maxDuration: 300s  (requires Pro plan)
-  /api/upload     → maxDuration: 60s
+  /api/upload     → maxDuration: 120s
 
-Practical capacity per pipeline run:
-  ~3,000–5,000 words comfortably within 300s
-  ~10,000 words is the hard cap (will timeout above this)
-  Full books: use book mode — each chapter is a separate 300s window
+Practical capacity:
+  ~3,000–5,000 words per section comfortably within 300s
+  ~50,000 words max per section (hard cap)
+  Full books: book mode processes each chapter as a separate pipeline run
 ```
 
 ### Deploy
@@ -328,19 +273,27 @@ Practical capacity per pipeline run:
 ```bash
 cd web/
 git add . && git commit -m "your message"
-git push origin main        # GitHub stays in sync
-npx vercel --prod --yes     # Deploy to Vercel
+git push origin main        # Vercel auto-deploys from GitHub
 ```
 
 ---
 
-## Known Constraints & Roadmap
+## Chunk Detail UI
 
-| Constraint | Detail | Resolution path |
-|---|---|---|
-| Vercel 300s timeout | Limits each section to ~5,000 words | Move to Railway / Fly.io / Modal for persistent workers |
-| Sequential chunk processing | Chunks processed one at a time | Parallelise with `Promise.all` — watch API rate limits |
-| No persistence | Results lost on refresh | Add Vercel KV or Supabase to store sessions |
-| Book mode requires chapter detection | Flat documents not auto-split | Add manual chapter-split UI |
-| Memory extractor is async fire-and-forget | Memory lags one chunk behind | Await it before next chunk (trades speed for consistency) |
-| PDF chapter detection heuristic | Regex-based — may miss some headings | Improve with Claude-based chapter extraction in upload route |
+Each chunk displays:
+
+- **Collapsed**: chunk number, certification status (X/8 categories), quality score badge, issue count
+- **Expanded**:
+  - Quality score bar with tier explanation (90–100 Publication Ready → <60 Poor)
+  - 8-category certification grid from Reviewer 1 (pass/fail per category with specific issues)
+  - Colour-tagged issue list (CERT from Reviewer 1, STYLE from Reviewer 2)
+  - Full final translation text
+
+Score guide:
+| Range   | Label              | Meaning |
+|---------|--------------------|---------|
+| 90–100% | Publication Ready  | Meets all Aksharpith standards |
+| 80–89%  | Strong             | Minor issues corrected, ready for sign-off |
+| 70–79%  | Revised            | Multiple corrections applied |
+| 60–69%  | Needs Work         | Significant revision required |
+| <60%    | Poor               | Consider retranslating |

@@ -45,7 +45,7 @@ Rules:
 
 async function chunkerAgent(client: Anthropic, text: string): Promise<string[]> {
   const msg = await client.messages.create({
-    model: 'claude-sonnet-4-6',
+    model: 'claude-sonnet-4-20250514',
     max_tokens: 4096,
     system: 'You are a text splitter. Split the provided Gujarati text at natural paragraph boundaries into chunks of at most 500 words each. Never break a paragraph mid-sentence. Return ONLY valid JSON with no markdown fences.',
     messages: [{
@@ -71,7 +71,7 @@ Return JSON exactly as: {"chunks": ["chunk1 text", "chunk2 text", ...]}\n\nTEXT:
 
 async function translatorAgent(client: Anthropic, chunk: string, styleContext: string): Promise<string> {
   const msg = await client.messages.create({
-    model: 'claude-opus-4-6',
+    model: 'claude-sonnet-4-20250514',
     max_tokens: 4096,
     system: TRANSLATION_SYSTEM,
     messages: [{
@@ -96,7 +96,7 @@ async function reviewerAgent(
   styleContext: string,
 ): Promise<ReviewResult> {
   const msg = await client.messages.create({
-    model: 'claude-sonnet-4-6',
+    model: 'claude-sonnet-4-20250514',
     max_tokens: 4096,
     system: REVIEWER_SYSTEM,
     messages: [{
@@ -124,7 +124,7 @@ async function reviewerAgent(
 async function assemblerAgent(client: Anthropic, revisedChunks: string[]): Promise<string> {
   const combined = revisedChunks.join('\n\n');
   const msg = await client.messages.create({
-    model: 'claude-opus-4-6',
+    model: 'claude-sonnet-4-20250514',
     max_tokens: 8192,
     system: ASSEMBLER_SYSTEM,
     messages: [{

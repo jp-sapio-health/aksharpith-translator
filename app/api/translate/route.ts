@@ -6,32 +6,29 @@ import { adminDb } from '../../../lib/firebase-admin';
 export const dynamic    = 'force-dynamic';
 export const maxDuration = 300;
 
+// ─── Config ──────────────────────────────────────────────────────────────────
+
+const SONNET = 'claude-sonnet-4-20250514';
+const HAIKU  = 'claude-haiku-4-5-20251001';
+const BATCH  = 3;                // parallel chunk concurrency
+const RECHECK_THRESHOLD = 80;   // re-review chunks scoring below this
+
 // ─── Anthropic API helper ──────────────────────────────────────────────────────
 
 function callClaude(params: {
-  model: string;
-  max_tokens: number;
-  system: string;
-  messages: Array<{ role: string; content: string }>;
-  apiKey: string;
+  model: string; max_tokens: number; system: string;
+  messages: Array<{ role: string; content: string }>; apiKey: string;
 }): Promise<string> {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify({
-      model:      params.model,
-      max_tokens: params.max_tokens,
-      system:     params.system,
-      messages:   params.messages,
+      model: params.model, max_tokens: params.max_tokens,
+      system: params.system, messages: params.messages,
     });
-
     const req = https.request({
-      hostname: 'api.anthropic.com',
-      path:     '/v1/messages',
-      method:   'POST',
+      hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
       headers: {
-        'x-api-key':          params.apiKey,
-        'anthropic-version':  '2023-06-01',
-        'content-type':       'application/json',
-        'content-length':     Buffer.byteLength(body),
+        'x-api-key': params.apiKey, 'anthropic-version': '2023-06-01',
+        'content-type': 'application/json', 'content-length': Buffer.byteLength(body),
       },
     }, (res) => {
       let raw = '';
@@ -44,9 +41,7 @@ function callClaude(params: {
         try {
           const data = JSON.parse(raw) as { content: Array<{ type: string; text: string }> };
           resolve(data.content?.[0]?.text?.trim() ?? '');
-        } catch {
-          reject(new Error('Parse error: ' + raw.slice(0, 200)));
-        }
+        } catch { reject(new Error('Parse error: ' + raw.slice(0, 200))); }
       });
     });
     req.on('error', reject);
@@ -55,8 +50,25 @@ function callClaude(params: {
   });
 }
 
+// ─── Parallel batch helper ──────────────────────────────────────────────────
+
+async function parallelBatch<T>(
+  items: T[], fn: (item: T, index: number) => Promise<void>, batchSize: number,
+): Promise<void> {
+  for (let start = 0; start < items.length; start += batchSize) {
+    const batch = items.slice(start, start + batchSize);
+    await Promise.all(batch.map((item, bi) => fn(item, start + bi)));
+  }
+}
+
+// Safe slice that doesn't cut mid-word
+function safeSlice(s: string, max: number): string {
+  if (s.length <= max) return s;
+  const cut = s.lastIndexOf(' ', max);
+  return cut > 0 ? s.slice(0, cut) : s.slice(0, max);
+}
+
 // ─── Gold Standard Context ────────────────────────────────────────────────────
-// Source: Aksharpith House Rules, Master Glossary, Examples & Lessons from BAPS Translations
 
 const HOUSE_RULES_CONTEXT = `
 AKSHARPITH HOUSE-STYLE RULES (NON-NEGOTIABLE):
@@ -64,14 +76,14 @@ AKSHARPITH HOUSE-STYLE RULES (NON-NEGOTIABLE):
 1. LANGUAGE: British English, Oxford -ize spellings (organize, realize, colour, travelling, programme, fulfil).
 
 2. PUNCTUATION (HIGHEST PRIORITY):
-   - Curly double speech marks (" ") for ALL direct quotations and speech. NEVER straight quotes.
-   - Nested: "Swamishri said, 'Prapti is 24 hours.'"
-   - Spaced en dash ( – ) for parenthetical clauses. NEVER em dash.
+   - Curly double speech marks (\u201c \u201d) for ALL direct quotations and speech. NEVER straight quotes.
+   - Nested: \u201cSwamishri said, \u2018Prapti is 24 hours.\u2019\u201d
+   - Spaced en dash ( \u2013 ) for parenthetical clauses. NEVER em dash.
    - Footnotes end with full stops if complete sentences.
 
 3. DIACRITICS (HIGHLY RESTRICTED):
-   - Use ā ONLY when directly quoting poetic/canonical verses (e.g., "Ātmā jāgo re…")
-   - NEVER use macrons (ī, ū, ṛ, ṅ, etc.) in prose.
+   - Use \u0101 ONLY when directly quoting poetic/canonical verses (e.g., \u201c\u0100tm\u0101 j\u0101go re\u2026\u201d)
+   - NEVER use macrons (\u012b, \u016b, \u1e5b, \u1e45, etc.) in prose.
    - In prose: prapti, bhakti, anand, murti (no diacritics).
 
 4. MANDATORY TERMINOLOGY:
@@ -79,10 +91,10 @@ AKSHARPITH HOUSE-STYLE RULES (NON-NEGOTIABLE):
    - Swami / Swamis (NEVER "saint" / "sadhu")
    - devotee(s) (not "haribhakta")
    - Akshardham (NEVER "divine abode")
-   - Shriji Maharaj (two words — NEVER "Shrijimaharaj")
+   - Shriji Maharaj (two words \u2014 NEVER "Shrijimaharaj")
    - Bhagwan Swaminarayan (not "Lord Swaminarayan")
-   - Mahant Swami Maharaj → Swamishri (after first reference)
-   - Pramukh Swami Maharaj → Swamishri (after first reference)
+   - Mahant Swami Maharaj \u2192 Swamishri (after first reference)
+   - Pramukh Swami Maharaj \u2192 Swamishri (after first reference)
    - austerities (not "penance")
    - mukhpath (not "recitation")
    - shastra (not "scripture" in spiritual context)
@@ -92,8 +104,7 @@ AKSHARPITH HOUSE-STYLE RULES (NON-NEGOTIABLE):
    - paramhansa, bawa, arti, vichran (BAPS standard spellings)
    - brahmisthiti (not "Brahmic state")
    - successor (not "torchbearer")
-   - Naran'da (short form — consistent)
-   - arti (not "aarti" — single a)
+   - arti (not "aarti" \u2014 single a)
 
 5. PLACE NAMES (EXACT SPELLINGS):
    Chansad, Bamangam, Dhuliya, Dangara, Bhadrod, Piplana
@@ -105,7 +116,7 @@ AKSHARPITH HOUSE-STYLE RULES (NON-NEGOTIABLE):
    - Never infer inner thoughts unless the source documents them.
 
 7. TONE: Dignified, measured, reverent, clear, intellectually honest.
-   - Never: hype, dramatic exaggeration, "life-changing", "BAPS is proud…"
+   - Never: hype, dramatic exaggeration, "life-changing", "BAPS is proud\u2026"
    - Never: casual register, American marketing tone.
    - Never: "mythology" for Hindu texts (use "scripture" or "sacred history").
    - Never: modern management terms (CEO, strategy, etc.) in historical contexts.
@@ -113,26 +124,25 @@ AKSHARPITH HOUSE-STYLE RULES (NON-NEGOTIABLE):
 8. TRANSLATION FIDELITY:
    - Preserve meaning, sequence, theology, emotional tone.
    - Do NOT add interpretation not present in source.
-   - Do NOT paraphrase or summarise — translate fully, line by line.
+   - Do NOT paraphrase or summarise \u2014 translate fully, line by line.
    - Do NOT soften strong expressions.
    - Retain direct quotes in first person; never convert to indirect speech.
 
 9. POETRY & VERSE:
    - Include Roman transliteration FIRST, then English meaning.
    - Retain original Gujarati/Sanskrit verse line intact.
-   - Use ā diacritics only within quoted verse.
+   - Use diacritics only within quoted verse.
    - Italicise transliterated verses.
 
 10. FORMATTING:
     - Preserve all paragraph breaks from source.
     - No headers unless present in source.
     - Italicise book titles.
-    - Do not add ellipsis to truncate verse — reproduce in full.`;
+    - Do not add ellipsis to truncate verse \u2014 reproduce in full.`;
 
 const KEY_GLOSSARY = `
 KEY THEOLOGICAL GLOSSARY (use these exact English renderings):
 akshar: Imperishable; second-highest of five eternal realities
-Aksharbrahmma: See Akshar
 Akshardham: The highest divine abode of Bhagwan Swaminarayan
 akshar-mukta: A jiva that has attained ultimate liberation
 antahkaran: Inner faculty (mind, buddhi, chitt, ahamkar collectively)
@@ -162,169 +172,133 @@ Swamishri: Revered address for the current/previous spiritual successor
 vachanamrut: Recorded divine discourses of Bhagwan Swaminarayan
 vichran: Travels/tours of a spiritual leader (BAPS spelling)`;
 
-// ─── System Prompts (based on Gold Standard Prompts) ─────────────────────────
+// BAPS terms the smoother and assembler must never replace
+const PROTECTED_TERMS = 'mandir, seva, satsang, arti, vichran, mukhpath, katha, kirtan, dharma, moksha, bhakti, atma, maya, paramhansa, brahmisthiti, santmandal, shastra, Swamishri, Akshardham, vachanamrut';
 
-// PROMPT 1 (Chunker): Structural splitter
-const CHUNKER_SYSTEM = `You are a structural analyst for Gujarati sacred texts. Split text at natural paragraph and verse boundaries into chunks of at most 500 words. Never break mid-sentence, mid-verse, or mid-quotation. If a chapter heading is present, always start a new chunk at the heading. Return ONLY valid JSON — no markdown fences.`;
+// ─── System Prompts (Bond-audited) ──────────────────────────────────────────
 
-// PROMPT 2 (Translator): Trustee of tradition mindset
-const TRANSLATOR_SYSTEM = `You are a trustee of tradition (parampara) for Aksharpith, the publishing wing of BAPS Swaminarayan Sanstha. Your priority is FIDELITY OVER FLUENCY. You are a carrier of the original voice — not a commentator, not an editor.
+const CHUNKER_SYSTEM = `You are a structural analyst for Gujarati sacred texts. Split the input into chunks for translation.
 
-I have locked in these rules:
+RULES:
+- Target 300\u2013500 words per chunk. If the entire input is under 500 words, return it as a single chunk.
+- Split ONLY at blank-line paragraph boundaries or verse boundaries. Never break mid-sentence, mid-verse, or mid-quotation.
+- If a chapter heading is present, always start a new chunk at the heading. Keep a heading attached to the paragraph(s) that follow it.
+- If no natural break point exists within 500 words, allow the chunk to exceed 500 rather than breaking mid-sentence.
+
+Return ONLY valid JSON matching this schema (no markdown fences):
+{"chunks": ["chunk1 text", "chunk2 text", ...]}`;
+
+const TRANSLATOR_SYSTEM = `You are a trustee of tradition (parampara) for Aksharpith, the publishing wing of BAPS Swaminarayan Sanstha. Your priority is FIDELITY OVER FLUENCY. You are a carrier of the original voice \u2014 not a commentator, not an editor.
 
 ${HOUSE_RULES_CONTEXT}
 
 ${KEY_GLOSSARY}
 
-MINDSET: You are translating sacred biographical and historical Gujarati texts. Every sentence carries devotional, historical, and doctrinal weight. Preserve it completely. Provide ONLY the English translation — no preamble, no notes, no commentary.`;
+UNLISTED TERMS: If you encounter a Gujarati term not in the glossary, transliterate it without diacritics and keep it untranslated. Use context to make the meaning clear. Never invent an English gloss.
 
-// ─── REVIEWER 1: BAPS Translation Certification Checklist + Common Pitfalls ───
-const REVIEWER1_SYSTEM = `You are a BAPS translation certification auditor. Perform a structured pre-publication certification audit against the BAPS Translation Certification Checklist and the Common Pitfalls in BAPS Translation diagnostic tool.
+ALREADY-ENGLISH TEXT: If a passage in the source is already in English, reproduce it exactly.
+
+MINDSET: Every sentence carries devotional, historical, and doctrinal weight. Preserve it completely. Provide ONLY the English translation \u2014 no preamble, no notes, no commentary.`;
+
+const REVIEWER1_SYSTEM = `You are a BAPS translation certification auditor. Perform a structured pre-publication certification audit.
 
 BAPS TRANSLATION CERTIFICATION CHECKLIST:
 
-A. TERMINOLOGY — Verify mandatory terms are used correctly:
+A. TERMINOLOGY \u2014 Verify mandatory terms:
    mandir (NEVER "temple") | Swami/Swamis (NEVER "saint/saints/sadhu")
-   Akshardham (NEVER "divine abode" or "heavenly abode") | Shriji Maharaj (two words — NEVER "Shrijimaharaj")
-   Bhagwan Swaminarayan (NEVER "Lord Swaminarayan") | Swamishri (for Pramukh/Mahant Swami Maharaj after first reference)
+   Akshardham (NEVER "divine abode") | Shriji Maharaj (two words \u2014 NEVER "Shrijimaharaj")
+   Bhagwan Swaminarayan (NEVER "Lord Swaminarayan") | Swamishri (after first reference)
    austerities (NEVER "penance") | devotees (NEVER "haribhaktas")
-   seva / satsang / arti / vichran / mukhpath (BAPS exact spellings — never service/fellowship/aarti/vicharan/recitation)
-   successor (NEVER "torchbearer") | santmandal (for a collective group of saints)
+   seva/satsang/arti/vichran/mukhpath (exact spellings) | successor (NEVER "torchbearer")
 
-B. PUNCTUATION — Verify:
-   Curly double speech marks " " for ALL direct quotations (NEVER straight " or ')
-   Spaced en dash ( – ) for parenthetical clauses (NEVER em dash —)
-   Footnotes end with full stops if complete sentences
+B. PUNCTUATION \u2014 Curly quotes \u201c \u201d (NEVER straight) | Spaced en dash ( \u2013 ) NEVER em dash
 
-C. DIACRITICS — Verify:
-   NO macrons (ā, ī, ū, ṛ, ṅ, ṭ, ḍ) anywhere in PROSE
-   Diacritics are permitted ONLY inside directly quoted canonical or poetic verses
-   Correct prose spellings: prapti, bhakti, atma, murti, akshar, dhyan (no diacritics)
+C. DIACRITICS \u2014 NO macrons in prose. Only inside quoted verse.
 
-D. TONE & REGISTER — Verify:
-   British English throughout (colour, travelling, organise, programme, fulfil)
-   Oxford -ize forms (organize, realize, recognize) — not -ise
-   No American marketing language ("life-changing", "BAPS is proud to announce")
-   No casual register, no modern management terms in historical contexts
-   No "mythology" for Hindu sacred texts (use "scripture" or "sacred history")
-   Dignified, measured, reverent scholarly tone throughout
+D. TONE \u2014 British English, Oxford -ize (organize, realize, colour, travelling, programme, fulfil). No American marketing. No "mythology" for sacred texts.
 
-E. TRANSLATION FIDELITY — Verify:
-   Nothing added that is not in the Gujarati source
-   Nothing omitted or paraphrased
-   Direct speech preserved in first person (NEVER converted to indirect speech: "he said that…")
-   No interpreter commentary or editorial explanation inserted into the text
+E. FIDELITY \u2014 Nothing added/omitted. Direct speech stays first-person. No commentary.
 
-F. VERSE & POETRY HANDLING — Verify:
-   Roman transliteration appears FIRST before the English meaning
-   Both transliteration and English meaning are present (not just one)
-   Original Gujarati/Sanskrit verse reproduced in full (no ellipsis to truncate)
-   Transliterated verses italicised
+F. VERSE \u2014 Transliteration FIRST, then English meaning. Full reproduction, no truncation.
 
-G. HISTORICAL ACCURACY — Verify:
-   Exact dates and times preserved (e.g. "2.16 a.m." — not approximated to "early morning")
-   Place names use exact BAPS spellings: Chansad, Bamangam, Dhuliya, Dangara, Bhadrod, Piplana
-   Era-correct names used ("Bombay Province" not "Mumbai" for historical references)
+G. HISTORICAL \u2014 Exact dates/times. Place names: Chansad, Bamangam, Dhuliya, Dangara. Era-correct names.
 
-H. COMPLETENESS — Verify:
-   All paragraphs from the source have been translated; no sentence is truncated
+H. COMPLETENESS \u2014 All paragraphs translated, no truncation.
 
-COMMON PITFALLS IN BAPS TRANSLATION (check each explicitly):
-1. "saints" / "saint" used instead of "Swamis" / "Swami"
-2. "temple" used instead of "mandir"
-3. "Lord Swaminarayan" used instead of "Bhagwan Swaminarayan"
-4. "divine abode" or "heavenly abode" used instead of "Akshardham"
-5. "Shrijimaharaj" written as one word instead of "Shriji Maharaj" (two words)
-6. "penance" used instead of "austerities"
-7. "haribhaktas" used instead of "devotees"
-8. Direct speech converted to indirect speech ("he said that…")
-9. Commentary or interpretation added that is not in the Gujarati source
-10. Straight quotes used instead of curly quotes
-11. Em dash (—) used instead of spaced en dash ( – )
-12. Macrons used in prose (prāpti, bhaktī instead of prapti, bhakti)
-13. Verse transliteration missing before the English meaning
-14. "mythology" used for Hindu sacred texts
-15. "aarti" used instead of "arti"
-16. "vicharan" used instead of "vichran"
-17. "torchbearer" used instead of "successor"
-18. Misspelled place names: "Chanasad" → Chansad | "Bamangaon" → Bamangam | "Dungara" → Dangara
-19. American English spellings: color → colour | traveling → travelling | center → centre
-20. "satsang" translated as "fellowship" instead of being kept as "satsang"
+COMMON PITFALLS (check each):
+1. saints\u2192Swamis 2. temple\u2192mandir 3. Lord Swaminarayan\u2192Bhagwan Swaminarayan
+4. divine abode\u2192Akshardham 5. Shrijimaharaj\u2192Shriji Maharaj 6. penance\u2192austerities
+7. haribhaktas\u2192devotees 8. indirect speech conversion 9. added commentary
+10. straight quotes 11. em dash 12. macrons in prose 13. missing transliteration
+14. mythology 15. aarti\u2192arti 16. vicharan\u2192vichran 17. torchbearer\u2192successor
+18. place name misspellings 19. American spellings 20. satsang\u2192fellowship
 
-For each category A–H: determine pass (true) or fail (false) and list specific issues with examples from the text.
-List all pitfalls found with a brief example from the text.
-Score 0–100: start at 100 and deduct points per issue (minor: 3–5pts, major: 8–12pts, critical: 15–20pts).
-Produce a corrected revised translation that fixes ALL issues identified above.
-Set "certifiable" to true only if ALL 8 categories pass and zero pitfalls are found.
+SCORING: Start at 100. Deduct per issue (minor: 3\u20135pts, major: 8\u201312pts, critical: 15\u201320pts).
+Set "certifiable" to true only if ALL 8 categories pass AND zero pitfalls found.
+Produce a corrected revised translation fixing ALL issues.
 
-Return ONLY valid JSON — no markdown fences, no prose outside JSON.`;
+Return ONLY valid JSON (no fences):
+{"categories": [{"id": "...", "name": "...", "pass": true, "issues": []}], "pitfalls": [], "score": <0-100>, "revised": "...", "certifiable": false}`;
 
-// REVIEWER 2 (was REVIEWER_SYSTEM): Checks against house style + correction examples
-const REVIEWER2_SYSTEM = `You are a senior editorial reviewer for Aksharpith publications. You check Gujarati-to-English translations against the house style and BAPS correction standards.
+const REVIEWER2_SYSTEM = `You are a senior style reviewer for Aksharpith. The translation has already passed a BAPS certification audit for terminology, diacritics, and punctuation. Your role is STYLE AND REGISTER only.
 
-${HOUSE_RULES_CONTEXT}
+CHECK THESE DIMENSIONS:
+1. REGISTER: Is the tone consistently dignified, measured, and reverent? Flag casual, promotional, or American-register phrasing.
+2. PROSE QUALITY: Are sentences well-constructed? Flag awkward calques from Gujarati syntax, overly literal phrasing, or unnatural English.
+3. CONSISTENCY: Are the same terms rendered the same way throughout? Flag inconsistent renderings.
+4. BRITISH ENGLISH: Verify Oxford -ize spellings (organize, realize) and British forms (colour, travelling, programme).
+5. FLOW: Do paragraphs transition naturally? Flag abrupt jumps or choppy prose.
 
-CRITICAL CORRECTIONS FROM MASTER LEARNING DOCUMENT:
-- "saints" → must be "Swamis" or "Swami"
-- "temple" → must be "mandir"
-- "divine abode" → must be "Akshardham"
-- "Shrijimaharaj" → must be "Shriji Maharaj" (two words)
-- "mythology" → must be "scripture" or "sacred history"
-- "penance" → must be "austerities"
-- "haribhaktas" → must be "devotees"
-- "torchbearer" → must be "successor"
-- "aarti" → must be "arti"
-- "vicharan" → must be "vichran"
-- "Chanasad" → "Chansad" | "Bamangaon" → "Bamangam" | "Dungara" → "Dangara"
-- Direct speech must stay first-person; never convert to indirect
-- All poetic lines must include transliteration + English meaning
-- Straight quotes " " → must be curly " "
-- Em dash — → must be spaced en dash –
+SCORING: Start at 100. Deduct 3pts per minor style issue, 8pts per register violation, 12pts per consistency error.
 
-Score 0–100. Return ONLY valid JSON — no markdown fences, no prose outside JSON.`;
+Return ONLY valid JSON (no fences):
+{"score": <0-100>, "issues": ["issue 1", ...], "revised": "<improved translation>"}`;
 
-// PROMPT 4 (Smoother): Readability pass
-const SMOOTHER_SYSTEM = `You are a senior editorial reader for Aksharpith publications performing a final readability pass on a completed translation.
+const SMOOTHER_SYSTEM = `You are a senior editorial reader for Aksharpith performing a final readability pass.
 
-WHAT TO IMPROVE:
+IMPROVE:
 - Smooth awkward phrasing and unnatural flow in narrative prose
 - Restructure overly long or heavily nested sentences
-- Add natural transitions between paragraphs where the English feels abrupt
+- Add natural transitions where the English feels abrupt
 - Remove repetitive sentence openings
 
-WHAT TO NEVER CHANGE:
-- Direct quotes from any named historical figure, scholar, or Swami — leave these WORD FOR WORD
-- Transliterated verses and their translations — reproduce in full, never truncate
+NEVER CHANGE:
+- Direct quotes from any named figure, scholar, or Swami \u2014 WORD FOR WORD
+- Transliterated verses and their translations \u2014 reproduce in full
 - All proper nouns, Sanskrit/Gujarati terms, place names, personal names
 - All dates, numbers, time stamps
+- These BAPS terms (never replace with English equivalents): ${PROTECTED_TERMS}
 
-STYLE:
-- En dash ( – ) throughout; NEVER em dash
-- British English, Oxford -ize (recognize, organize, realize)
-- Italicise transliterated verses and book titles
-- Curly double speech marks " " — never straight quotes
-- Reverent, dignified, measured tone
+If the input is entirely verse/poetry with no narrative prose, return it unchanged.
 
-Return ONLY the revised text — no preamble, no notes.`;
+STYLE: En dash ( \u2013 ) throughout | British English, Oxford -ize | Curly quotes | Reverent tone
 
-// PROMPT 5 (Assembler): Final book assembly
-const ASSEMBLER_SYSTEM = `You are a senior editor for Aksharpith publications assembling a multi-chunk translation into a single, coherent, publication-ready English document.
+Return ONLY the revised text \u2014 no preamble, no notes.`;
 
-Rules:
+const ASSEMBLER_SYSTEM = `You are a senior editor assembling a multi-chunk translation into a single publication-ready document.
+
+STRUCTURAL OPERATIONS ONLY:
 - Remove all chunk markers, separators, and numbering
-- Ensure smooth transitions at chunk joins
+- If two adjacent chunks overlap (repeated sentences at boundaries), deduplicate
+- Ensure no orphaned headings or broken paragraphs at join points
 - Preserve chapter headings exactly as they appear
-- Maintain consistent British English, Oxford style, and reverent scholarly tone
-- Preserve all paragraph breaks, verse quotations, and block quotations exactly
-- Output ONLY the final assembled document — no preamble or notes`;
 
-// ─── Agent functions ────────────────────────────────────────────────────────────
+DO NOT:
+- Rewrite, rephrase, or alter any sentence content
+- Add transitional phrases not present in the chunks
+- Change terminology, spelling, or punctuation
+- Remove or reorder any paragraphs
+- Replace these terms: ${PROTECTED_TERMS}
+
+Output ONLY the final document \u2014 no preamble or notes.`;
+
+// ─── Agent functions ────────────────────────────────────────────────────────
 
 async function chunkerAgent(apiKey: string, text: string): Promise<string[]> {
   const raw = await callClaude({
-    model: 'claude-sonnet-4-20250514', max_tokens: 4096, apiKey,
+    model: HAIKU, max_tokens: 4096, apiKey,
     system: CHUNKER_SYSTEM,
-    messages: [{ role: 'user', content: `Split this Gujarati text into chunks of at most 500 words, splitting ONLY at natural paragraph or verse boundaries (blank lines). Return JSON exactly as: {"chunks": ["chunk1 text", "chunk2 text", ...]}\n\nTEXT:\n${text}` }],
+    messages: [{ role: 'user', content: `Split this Gujarati text into chunks. Return JSON: {"chunks": [...]}\n\nTEXT:\n${text}` }],
   });
   const match = raw.match(/\{[\s\S]*\}/);
   if (!match) return [text];
@@ -339,9 +313,9 @@ async function translatorAgent(
   apiKey: string, chunk: string,
   translationMemory: string, chunkIndex: number, totalChunks: number,
 ): Promise<string> {
-  const memorySection = translationMemory ? `\nTRANSLATION MEMORY (decisions made in previous chunks — maintain consistency):\n${translationMemory}\n\n${'─'.repeat(60)}\n` : '';
+  const memorySection = translationMemory ? `\nTRANSLATION MEMORY (decisions from previous chunks \u2014 maintain consistency):\n${translationMemory}\n\n${'─'.repeat(40)}\n` : '';
   return callClaude({
-    model: 'claude-sonnet-4-20250514', max_tokens: 4096, apiKey,
+    model: SONNET, max_tokens: 4096, apiKey,
     system: TRANSLATOR_SYSTEM,
     messages: [{ role: 'user', content: `${memorySection}Chunk ${chunkIndex + 1} of ${totalChunks}. Translate the following Gujarati text to English. Provide ONLY the translation.\n\nGUJARATI:\n${chunk}` }],
   });
@@ -357,14 +331,12 @@ interface Reviewer1Result {
   certifiable: boolean;
 }
 
-async function reviewer1Agent(
-  apiKey: string, original: string, translation: string,
-): Promise<Reviewer1Result> {
+async function reviewer1Agent(apiKey: string, original: string, translation: string): Promise<Reviewer1Result> {
   const fallback: Reviewer1Result = { categories: [], pitfalls: [], score: 75, revised: translation, certifiable: false };
   const raw = await callClaude({
-    model: 'claude-sonnet-4-20250514', max_tokens: 8192, apiKey,
+    model: SONNET, max_tokens: 8192, apiKey,
     system: REVIEWER1_SYSTEM,
-    messages: [{ role: 'user', content: `GUJARATI SOURCE:\n${original}\n\nTRANSLATION TO AUDIT:\n${translation}\n\nReturn JSON:\n{"categories": [{"id": "terminology", "name": "Terminology", "pass": true, "issues": []}, {"id": "punctuation", "name": "Punctuation", "pass": true, "issues": []}, {"id": "diacritics", "name": "Diacritics", "pass": true, "issues": []}, {"id": "tone", "name": "Tone & Register", "pass": true, "issues": []}, {"id": "fidelity", "name": "Fidelity", "pass": true, "issues": []}, {"id": "verse", "name": "Verse Handling", "pass": true, "issues": []}, {"id": "historical", "name": "Historical Accuracy", "pass": true, "issues": []}, {"id": "completeness", "name": "Completeness", "pass": true, "issues": []}], "pitfalls": ["example pitfall found"], "score": <0-100>, "revised": "<corrected translation>", "certifiable": false}` }],
+    messages: [{ role: 'user', content: `GUJARATI SOURCE:\n${original}\n\nTRANSLATION TO AUDIT:\n${translation}` }],
   });
   const match = raw.match(/\{[\s\S]*\}/);
   if (!match) return fallback;
@@ -372,29 +344,27 @@ async function reviewer1Agent(
     const p = JSON.parse(match[0]);
     return {
       categories:  Array.isArray(p.categories) ? p.categories : [],
-      pitfalls:    Array.isArray(p.pitfalls)   ? p.pitfalls.filter((s: unknown) => typeof s === 'string') : [],
-      score:       typeof p.score === 'number'  ? Math.max(0, Math.min(100, p.score)) : 75,
+      pitfalls:    Array.isArray(p.pitfalls) ? p.pitfalls.filter((s: unknown) => typeof s === 'string') : [],
+      score:       typeof p.score === 'number' ? Math.max(0, Math.min(100, p.score)) : 75,
       revised:     typeof p.revised === 'string' && p.revised.trim() ? p.revised.trim() : translation,
       certifiable: typeof p.certifiable === 'boolean' ? p.certifiable : false,
     };
   } catch { return fallback; }
 }
 
-async function reviewer2Agent(
-  apiKey: string, original: string, translation: string,
-): Promise<ReviewResult> {
+async function reviewer2Agent(apiKey: string, original: string, translation: string): Promise<ReviewResult> {
   const raw = await callClaude({
-    model: 'claude-sonnet-4-20250514', max_tokens: 8192, apiKey,
+    model: SONNET, max_tokens: 8192, apiKey,
     system: REVIEWER2_SYSTEM,
-    messages: [{ role: 'user', content: `ORIGINAL (Gujarati):\n${original}\n\nTRANSLATION TO REVIEW:\n${translation}\n\nReturn JSON:\n{"score": <integer 0-100>, "issues": ["issue 1", ...], "revised": "<corrected translation or identical if no changes>"}` }],
+    messages: [{ role: 'user', content: `ORIGINAL (Gujarati):\n${original}\n\nTRANSLATION TO REVIEW:\n${translation}` }],
   });
   const match = raw.match(/\{[\s\S]*\}/);
   if (!match) return { score: 70, issues: [], revised: translation };
   try {
     const p = JSON.parse(match[0]);
     return {
-      score:   typeof p.score   === 'number' ? Math.max(0, Math.min(100, p.score)) : 70,
-      issues:  Array.isArray(p.issues)        ? p.issues.filter((s: unknown) => typeof s === 'string') : [],
+      score:   typeof p.score === 'number' ? Math.max(0, Math.min(100, p.score)) : 70,
+      issues:  Array.isArray(p.issues) ? p.issues.filter((s: unknown) => typeof s === 'string') : [],
       revised: typeof p.revised === 'string' && p.revised.trim() ? p.revised.trim() : translation,
     };
   } catch { return { score: 70, issues: [], revised: translation }; }
@@ -402,9 +372,9 @@ async function reviewer2Agent(
 
 async function smootherAgent(apiKey: string, text: string): Promise<string> {
   return callClaude({
-    model: 'claude-sonnet-4-20250514', max_tokens: 8192, apiKey,
+    model: SONNET, max_tokens: 8192, apiKey,
     system: SMOOTHER_SYSTEM,
-    messages: [{ role: 'user', content: `Perform the readability pass on the following translation. Return ONLY the revised text.\n\n${text}` }],
+    messages: [{ role: 'user', content: `Perform the readability pass. Return ONLY the revised text.\n\n${text}` }],
   });
 }
 
@@ -412,18 +382,17 @@ async function assemblerAgent(apiKey: string, smoothedChunks: string[]): Promise
   const combined = smoothedChunks.join('\n\n');
   if (smoothedChunks.length === 1) return combined;
   return callClaude({
-    model: 'claude-sonnet-4-20250514', max_tokens: 16000, apiKey,
+    model: SONNET, max_tokens: 16000, apiKey,
     system: ASSEMBLER_SYSTEM,
-    messages: [{ role: 'user', content: `Assemble these translated chunks into a single coherent document.\n\n${combined}` }],
+    messages: [{ role: 'user', content: `Assemble these chunks into a single document:\n\n${combined}` }],
   });
 }
 
-// Extract proper noun decisions from a translation for cross-chunk memory
 async function extractTranslationMemory(apiKey: string, gujarati: string, english: string): Promise<string> {
   const raw = await callClaude({
-    model: 'claude-haiku-4-5-20251001', max_tokens: 512, apiKey,
-    system: 'You extract proper noun translation decisions from Gujarati→English translations. Return a concise bulleted list of name/term decisions, e.g. "• ગઢડા → Gadhada". Only include non-obvious decisions. If nothing notable, return an empty string. No JSON, no preamble.',
-    messages: [{ role: 'user', content: `Gujarati source:\n${gujarati.slice(0, 500)}\n\nEnglish translation:\n${english.slice(0, 500)}\n\nList any proper noun / term decisions made:` }],
+    model: HAIKU, max_tokens: 512, apiKey,
+    system: `You extract proper noun translation decisions from Gujarati\u2192English translations. Return a concise bulleted list, e.g. "\u2022 \u0a97\u0aa2\u0aa1\u0abe \u2192 Gadhada". Only include non-obvious decisions (NOT standard BAPS terms like mandir, seva, satsang, arti, vichran). If nothing notable, return empty string. No JSON, no preamble.`,
+    messages: [{ role: 'user', content: `Gujarati source:\n${safeSlice(gujarati, 500)}\n\nEnglish translation:\n${safeSlice(english, 500)}\n\nList non-obvious proper noun decisions:` }],
   });
   return raw.trim();
 }
@@ -448,7 +417,7 @@ export async function POST(req: NextRequest) {
 
   const wordCount = text.trim().split(/\s+/).length;
   if (wordCount > 50000) {
-    return new Response(JSON.stringify({ error: `Section too long (${wordCount.toLocaleString()} words). Maximum is 50,000 words. Upload the full document and use book mode to process chapter by chapter.` }), { status: 400 });
+    return new Response(JSON.stringify({ error: `Section too long (${wordCount.toLocaleString()} words). Maximum is 50,000.` }), { status: 400 });
   }
 
   const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
@@ -462,87 +431,93 @@ export async function POST(req: NextRequest) {
       const send = (data: Record<string, unknown>) =>
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
 
-      // Keep the SSE connection alive during long Claude API calls.
-      // Vercel's proxy closes idle connections after ~20s with no data.
-      const keepalive = (fn: () => Promise<void>) => {
-        const interval = setInterval(() => {
-          try { controller.enqueue(encoder.encode(': keepalive\n\n')); } catch { /* stream closed */ }
-        }, 10000);
-        return fn().finally(() => clearInterval(interval));
-      };
+      // Global keepalive — single interval for the entire stream
+      const keepaliveInterval = setInterval(() => {
+        try { controller.enqueue(encoder.encode(': keepalive\n\n')); } catch { /* closed */ }
+      }, 10000);
 
       try {
         const context = chapterTitle ? ` — ${chapterTitle}` : '';
 
-        // ── Stage 1: Chunker ───────────────────────────────────────────
+        // ── Stage 1: Chunker (Haiku — fast) ────────────────────────────
         send({ stage: 'chunker', status: 'running' });
-        let chunks: string[] = [];
-        await keepalive(async () => { chunks = await chunkerAgent(apiKey, text); });
+        const chunks = await chunkerAgent(apiKey, text);
         send({ stage: 'chunker', status: 'done', count: chunks.length, chunks, context });
 
-        // ── Stage 2: Translator (with cross-chunk memory) ──────────────
+        // ── Stage 2: Translator (sequential — needs cross-chunk memory) ─
         send({ stage: 'translator', status: 'running' });
-        const translations: string[] = [];
+        const translations: string[] = new Array(chunks.length).fill('');
         let translationMemory = '';
 
         for (let i = 0; i < chunks.length; i++) {
-          let translation = '';
-          await keepalive(async () => { translation = await translatorAgent(apiKey, chunks[i], translationMemory, i, chunks.length); });
-          translations.push(translation);
-          send({ stage: 'translator', status: 'progress', current: i + 1, total: chunks.length, index: i, translation });
-          // Update cross-chunk memory asynchronously (don't await — update on next chunk)
+          translations[i] = await translatorAgent(apiKey, chunks[i], translationMemory, i, chunks.length);
+          send({ stage: 'translator', status: 'progress', current: i + 1, total: chunks.length, index: i, translation: translations[i] });
           if (i < chunks.length - 1) {
-            extractTranslationMemory(apiKey, chunks[i], translation)
+            extractTranslationMemory(apiKey, chunks[i], translations[i])
               .then(mem => { if (mem) translationMemory = (translationMemory + '\n' + mem).trim().slice(-2000); })
               .catch(() => {});
           }
         }
         send({ stage: 'translator', status: 'done', memorySize: translationMemory.length });
 
-        // ── Stage 3: Reviewer 1 (BAPS Certification Audit) ────────────
+        // ── Stage 3: Reviewer 1 — PARALLEL ─────────────────────────────
         send({ stage: 'reviewer1', status: 'running' });
-        const reviewer1Results: Reviewer1Result[] = [];
+        const reviewer1Results: Reviewer1Result[] = new Array(chunks.length);
+        let r1Done = 0;
 
-        for (let i = 0; i < chunks.length; i++) {
-          let r1: Reviewer1Result = { categories: [], pitfalls: [], score: 75, revised: translations[i], certifiable: false };
-          await keepalive(async () => { r1 = await reviewer1Agent(apiKey, chunks[i], translations[i]); });
-          reviewer1Results.push(r1);
-          send({ stage: 'reviewer1', status: 'progress', chunk: i + 1, total: chunks.length, index: i, categories: r1.categories, pitfalls: r1.pitfalls, score: r1.score, certifiable: r1.certifiable });
-        }
+        await parallelBatch(chunks, async (_, i) => {
+          reviewer1Results[i] = await reviewer1Agent(apiKey, chunks[i], translations[i]);
+          r1Done++;
+          send({ stage: 'reviewer1', status: 'progress', completed: r1Done, total: chunks.length, index: i, categories: reviewer1Results[i].categories, pitfalls: reviewer1Results[i].pitfalls, score: reviewer1Results[i].score, certifiable: reviewer1Results[i].certifiable });
+        }, BATCH);
 
         const certCount = reviewer1Results.filter(r => r.certifiable).length;
         send({ stage: 'reviewer1', status: 'done', certCount, total: chunks.length });
 
-        // ── Stage 4: Reviewer 2 (Style + Correction Examples) ─────────
+        // ── Stage 4: Reviewer 2 — PARALLEL ─────────────────────────────
         send({ stage: 'reviewer2', status: 'running' });
-        const reviews: ReviewResult[] = [];
+        const reviews: ReviewResult[] = new Array(chunks.length);
+        let r2Done = 0;
 
-        for (let i = 0; i < chunks.length; i++) {
-          let review: ReviewResult = { score: 70, issues: [], revised: reviewer1Results[i].revised };
-          await keepalive(async () => { review = await reviewer2Agent(apiKey, chunks[i], reviewer1Results[i].revised); });
-          reviews.push(review);
-          send({ stage: 'reviewer2', status: 'progress', chunk: i + 1, total: chunks.length, index: i, score: review.score, issues: review.issues, revised: review.revised });
+        await parallelBatch(chunks, async (_, i) => {
+          reviews[i] = await reviewer2Agent(apiKey, chunks[i], reviewer1Results[i].revised);
+          r2Done++;
+          send({ stage: 'reviewer2', status: 'progress', completed: r2Done, total: chunks.length, index: i, score: reviews[i].score, issues: reviews[i].issues, revised: reviews[i].revised });
+        }, BATCH);
+
+        // ── Double-loop: re-review low-scoring chunks ──────────────────
+        const lowChunks = reviews.map((r, i) => i).filter(i => reviews[i].score < RECHECK_THRESHOLD);
+        if (lowChunks.length > 0) {
+          send({ stage: 'reviewer2', status: 'rechecking', count: lowChunks.length });
+
+          await parallelBatch(lowChunks, async (i) => {
+            // Re-run R1 on the R2-revised text
+            reviewer1Results[i] = await reviewer1Agent(apiKey, chunks[i], reviews[i].revised);
+            send({ stage: 'reviewer1', status: 'progress', completed: r1Done, total: chunks.length, index: i, categories: reviewer1Results[i].categories, pitfalls: reviewer1Results[i].pitfalls, score: reviewer1Results[i].score, certifiable: reviewer1Results[i].certifiable });
+            // Re-run R2 on the new R1-revised text
+            reviews[i] = await reviewer2Agent(apiKey, chunks[i], reviewer1Results[i].revised);
+            send({ stage: 'reviewer2', status: 'progress', completed: r2Done, total: chunks.length, index: i, score: reviews[i].score, issues: reviews[i].issues, revised: reviews[i].revised, recheck: true });
+          }, BATCH);
         }
 
         const avgScore = reviews.reduce((s, r) => s + r.score, 0) / reviews.length;
-        send({ stage: 'reviewer2', status: 'done', avgScore });
+        send({ stage: 'reviewer2', status: 'done', avgScore, rechecked: lowChunks.length });
 
-        // ── Stage 4: Smoother (Prompt 4 — readability pass) ───────────
+        // ── Stage 5: Smoother — PARALLEL ───────────────────────────────
         send({ stage: 'smoother', status: 'running' });
-        const smoothedChunks: string[] = [];
+        const smoothedChunks: string[] = new Array(chunks.length);
+        let smDone = 0;
 
-        for (let i = 0; i < reviews.length; i++) {
-          let smoothed = '';
-          await keepalive(async () => { smoothed = await smootherAgent(apiKey, reviews[i].revised); });
-          smoothedChunks.push(smoothed);
-          send({ stage: 'smoother', status: 'progress', current: i + 1, total: reviews.length, index: i });
-        }
+        await parallelBatch(reviews, async (_, i) => {
+          smoothedChunks[i] = await smootherAgent(apiKey, reviews[i].revised);
+          smDone++;
+          send({ stage: 'smoother', status: 'progress', completed: smDone, total: reviews.length, index: i });
+        }, BATCH);
         send({ stage: 'smoother', status: 'done' });
 
-        // ── Stage 5: Assembler ─────────────────────────────────────────
+        // ── Stage 6: Assembler ─────────────────────────────────────────
         send({ stage: 'assembler', status: 'running' });
-        let assembled = '';
-        await keepalive(async () => { assembled = await assemblerAgent(apiKey, smoothedChunks); });
+        const assembled = await assemblerAgent(apiKey, smoothedChunks);
         const finalWords = assembled.trim().split(/\s+/).length;
         send({ stage: 'assembler', status: 'done', output: assembled, wordCount: finalWords, avgScore: Math.round(avgScore) });
 
@@ -568,6 +543,7 @@ export async function POST(req: NextRequest) {
         console.error('Pipeline error:', msg);
         send({ error: msg });
       } finally {
+        clearInterval(keepaliveInterval);
         controller.close();
       }
     },
@@ -575,10 +551,10 @@ export async function POST(req: NextRequest) {
 
   return new Response(stream, {
     headers: {
-      'Content-Type':       'text/event-stream',
-      'Cache-Control':      'no-cache, no-transform',
-      'Connection':         'keep-alive',
-      'X-Accel-Buffering':  'no',
+      'Content-Type':      'text/event-stream',
+      'Cache-Control':     'no-cache, no-transform',
+      'Connection':        'keep-alive',
+      'X-Accel-Buffering': 'no',
     },
   });
 }

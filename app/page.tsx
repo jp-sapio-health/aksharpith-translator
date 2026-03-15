@@ -599,13 +599,13 @@ export default function Home() {
           }
         }
 
-        // ── Reviewer 1 (Certification Audit) ─────────────────────────
+        // ── Reviewer 1 (Certification Audit) — parallel ─────────────
         if (ev.stage === 'reviewer1') {
           if (ev.status === 'running') {
-            updateStage('reviewer1', { status: 'running', msg: 'Loading BAPS Certification Checklist and pitfall diagnostics…', progress: 0 });
+            updateStage('reviewer1', { status: 'running', msg: 'Running BAPS Certification Checklist (parallel)…', progress: 0 });
           } else if (ev.status === 'progress') {
-            const chk = ev.chunk as number, tot = ev.total as number;
-            updateStage('reviewer1', { status: 'running', msg: `Auditing chunk ${chk} of ${tot} — 8 certification categories, 20 common pitfalls…`, progress: Math.round((chk - 1) / tot * 100) });
+            const done = ev.completed as number, tot = ev.total as number;
+            updateStage('reviewer1', { status: 'running', msg: `Audited ${done} of ${tot} chunks — 8 categories, 20 pitfalls…`, progress: Math.round(done / tot * 100) });
             const idx = ev.index as number;
             chunkMap.current[idx] = {
               ...chunkMap.current[idx],
@@ -619,35 +619,40 @@ export default function Home() {
             setChunks(Object.values(chunkMap.current).sort((a, b) => a.index - b.index));
           } else if (ev.status === 'done') {
             const certCount = ev.certCount as number, total = ev.total as number;
-            updateStage('reviewer1', { status: 'done', msg: `Certification complete — ${certCount} of ${total} chunk${total !== 1 ? 's' : ''} fully certified`, progress: 100 });
+            updateStage('reviewer1', { status: 'done', msg: `Certification complete — ${certCount} of ${total} chunk${total !== 1 ? 's' : ''} certified`, progress: 100 });
           }
         }
 
-        // ── Reviewer 2 (Style Review) ─────────────────────────────────
+        // ── Reviewer 2 (Style Review) — parallel + double-loop ──────
         if (ev.stage === 'reviewer2') {
           if (ev.status === 'running') {
-            updateStage('reviewer2', { status: 'running', msg: 'Checking against 79+ BAPS correction examples and house rules…', progress: 0 });
+            updateStage('reviewer2', { status: 'running', msg: 'Style and register review (parallel)…', progress: 0 });
+          } else if (ev.status === 'rechecking') {
+            const n = ev.count as number;
+            updateStage('reviewer2', { status: 'running', msg: `Re-reviewing ${n} chunk${n !== 1 ? 's' : ''} scoring below 80% (double-loop)…` });
           } else if (ev.status === 'progress') {
-            const chk = ev.chunk as number, tot = ev.total as number;
-            updateStage('reviewer2', { status: 'running', msg: `Reviewing chunk ${chk} of ${tot} — scoring terminology, punctuation, and tone…`, progress: Math.round((chk - 1) / tot * 100) });
+            const done = ev.completed as number, tot = ev.total as number;
+            const recheck = ev.recheck as boolean | undefined;
+            updateStage('reviewer2', { status: 'running', msg: recheck ? `Re-reviewed chunk — correcting style issues…` : `Reviewed ${done} of ${tot} chunks…`, progress: Math.round(done / tot * 100) });
             const idx = ev.index as number;
             chunkMap.current[idx] = { ...chunkMap.current[idx], score: ev.score as number, issues: ev.issues as string[], revised: ev.revised as string, approved: (ev.score as number) >= 85 };
             setChunks(Object.values(chunkMap.current).sort((a, b) => a.index - b.index));
           } else if (ev.status === 'done') {
             const avg = Math.round(ev.avgScore as number);
-            updateStage('reviewer2', { status: 'done', msg: `Style review complete — avg quality score ${avg}%`, progress: 100 });
+            const rechecked = ev.rechecked as number;
+            updateStage('reviewer2', { status: 'done', msg: `Style review complete — avg ${avg}%${rechecked > 0 ? ` (${rechecked} re-reviewed)` : ''}`, progress: 100 });
           }
         }
 
-        // ── Smoother ──────────────────────────────────────────────────
+        // ── Smoother — parallel ─────────────────────────────────────
         if (ev.stage === 'smoother') {
           if (ev.status === 'running') {
-            updateStage('smoother', { status: 'running', msg: 'Readability pass — smoothing paragraph flow and transitions…', progress: 0 });
+            updateStage('smoother', { status: 'running', msg: 'Readability pass (parallel)…', progress: 0 });
           } else if (ev.status === 'progress') {
-            const cur = ev.current as number, tot = ev.total as number;
-            updateStage('smoother', { status: 'running', msg: `Smoothing chunk ${cur} of ${tot} — restructuring long sentences…`, progress: Math.round((cur - 1) / tot * 100) });
+            const done = ev.completed as number, tot = ev.total as number;
+            updateStage('smoother', { status: 'running', msg: `Smoothed ${done} of ${tot} chunks…`, progress: Math.round(done / tot * 100) });
           } else if (ev.status === 'done') {
-            updateStage('smoother', { status: 'done', msg: 'Readability pass complete — flow and transitions refined', progress: 100 });
+            updateStage('smoother', { status: 'done', msg: 'Readability pass complete', progress: 100 });
           }
         }
 

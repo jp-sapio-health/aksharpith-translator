@@ -23,6 +23,9 @@ interface ChunkData {
   translation?: string;
   reviewer1?: { categories: Reviewer1Category[]; pitfalls: string[]; score: number; certifiable: boolean };
   score?: number; issues?: string[]; revised?: string; approved?: boolean;
+  scoreHistory?: number[];
+  reviewRound?: number;
+  reviewing?: boolean;
 }
 
 interface ChapterResult {
@@ -335,6 +338,8 @@ function ChunkCard({ chunk, expanded, onToggle }: { chunk: ChunkData; expanded: 
   const certifiable = chunk.reviewer1?.certifiable ?? false;
 
   const tier = hasR2 ? scoreTier(chunk.score!) : null;
+  const history = chunk.scoreHistory ?? [];
+  const hasMultipleRounds = history.length > 1;
 
   const allIssues: Array<{ source: 'CERT' | 'STYLE'; text: string }> = [
     ...(chunk.reviewer1?.pitfalls.map(p => ({ source: 'CERT' as const, text: p })) ?? []),
@@ -344,34 +349,56 @@ function ChunkCard({ chunk, expanded, onToggle }: { chunk: ChunkData; expanded: 
   const displayText = chunk.revised || chunk.translation || '';
 
   return (
-    <div style={{ background: 'var(--bg-white)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', overflow: 'hidden', marginBottom: 12 }} className="fadein">
+    <div style={{
+      background: chunk.reviewing ? 'var(--amber-bg)' : 'var(--bg-white)',
+      border: `1px solid ${chunk.reviewing ? 'var(--amber-border)' : 'var(--border)'}`,
+      borderRadius: 'var(--radius)', overflow: 'hidden', marginBottom: 12,
+      transition: 'all 0.3s',
+    }} className="fadein">
 
       {/* ── Header — always visible, click to toggle ── */}
       <div
         onClick={onToggle}
-        style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '13px 18px', background: 'var(--bg)', cursor: 'pointer', borderBottom: expanded ? '1px solid var(--border-light)' : 'none', userSelect: 'none' }}
+        style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '13px 18px', background: chunk.reviewing ? 'var(--amber-bg)' : 'var(--bg)', cursor: 'pointer', borderBottom: expanded ? '1px solid var(--border-light)' : 'none', userSelect: 'none' }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 14, flex: 1, minWidth: 0 }}>
           <span style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 13, color: 'var(--text-light)', letterSpacing: 1, flexShrink: 0 }}>Chunk {chunk.index + 1}</span>
 
+          {/* Reviewing indicator */}
+          {chunk.reviewing && (
+            <span style={badgeStyle('running')}>Re-reviewing <span className="spinning" style={{ marginLeft: 4 }}>◌</span></span>
+          )}
+
           {/* Certification badge */}
-          {hasR1 && (
+          {!chunk.reviewing && hasR1 && (
             <span style={{
               fontSize: 10, fontWeight: 600, letterSpacing: 0.5, flexShrink: 0,
               color: certifiable ? 'var(--green)' : totalCats > 0 ? 'var(--amber)' : 'var(--text-light)',
             }}>
-              {certifiable ? '✓ Certified' : totalCats > 0 ? `${passedCats}/${totalCats} categories` : 'Auditing…'}
+              {certifiable ? '\u2713 Certified' : totalCats > 0 ? `${passedCats}/${totalCats} categories` : 'Auditing\u2026'}
             </span>
           )}
-          {!hasR1 && !hasR2 && displayText && (
+          {!chunk.reviewing && !hasR1 && !hasR2 && displayText && (
             <span style={{ fontSize: 13, fontWeight: 300, color: 'var(--text-muted)', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>
-              {displayText.slice(0, 80)}{displayText.length > 80 ? '…' : ''}
+              {displayText.slice(0, 80)}{displayText.length > 80 ? '\u2026' : ''}
+            </span>
+          )}
+
+          {/* Score evolution trail */}
+          {hasMultipleRounds && !chunk.reviewing && (
+            <span style={{ fontSize: 10, fontWeight: 500, color: 'var(--text-light)', letterSpacing: 0.3, flexShrink: 0 }}>
+              {history.map((s, i) => (
+                <span key={i}>
+                  {i > 0 && <span style={{ margin: '0 3px', color: s > history[i - 1] ? 'var(--green)' : 'var(--red)' }}>{s > history[i - 1] ? '\u2191' : '\u2193'}</span>}
+                  <span style={{ color: i === history.length - 1 ? 'var(--text)' : 'var(--text-muted)' }}>{s}%</span>
+                </span>
+              ))}
             </span>
           )}
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-          {hasR2 && tier && (
+          {hasR2 && tier && !chunk.reviewing && (
             <>
               <span style={{ fontFamily: "'Karla', sans-serif", fontSize: 12, fontWeight: 700, color: tier.type === 'strong' ? 'var(--green)' : tier.type === 'adequate' ? 'var(--amber)' : 'var(--red)' }}>
                 {chunk.score}%
@@ -379,12 +406,17 @@ function ChunkCard({ chunk, expanded, onToggle }: { chunk: ChunkData; expanded: 
               <span style={badgeStyle(tier.type)}>{tier.label}</span>
             </>
           )}
+          {hasMultipleRounds && (
+            <span style={{ fontSize: 10, fontWeight: 500, color: 'var(--text-light)', letterSpacing: 0.5 }}>
+              R{history.length}
+            </span>
+          )}
           {allIssues.length > 0 && (
             <span style={{ fontSize: 11, color: 'var(--amber)', fontWeight: 500 }}>
               {allIssues.length} issue{allIssues.length !== 1 ? 's' : ''}
             </span>
           )}
-          <span style={{ fontSize: 11, color: 'var(--text-light)', marginLeft: 2 }}>{expanded ? '▲' : '▼'}</span>
+          <span style={{ fontSize: 11, color: 'var(--text-light)', marginLeft: 2 }}>{expanded ? '\u25B2' : '\u25BC'}</span>
         </div>
       </div>
 
@@ -399,22 +431,57 @@ function ChunkCard({ chunk, expanded, onToggle }: { chunk: ChunkData; expanded: 
       {expanded && (
         <div style={{ padding: '0 18px 20px' }}>
 
-          {/* Score explanation */}
+          {/* Score explanation + evolution */}
           {hasR2 && tier && (
             <div style={{ padding: '14px 0 14px', borderBottom: '1px solid var(--border-light)', marginBottom: 16 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-                <span style={{ ...labelStyle, marginBottom: 0 }}>Quality Score — Reviewer 2</span>
+                <span style={{ ...labelStyle, marginBottom: 0 }}>Quality Score</span>
                 <span style={{ fontFamily: "'Karla', sans-serif", fontSize: 20, fontWeight: 700, color: tier.type === 'strong' ? 'var(--green)' : tier.type === 'adequate' ? 'var(--amber)' : 'var(--red)' }}>
                   {chunk.score}%
                 </span>
                 <span style={badgeStyle(tier.type)}>{tier.label}</span>
+                {hasMultipleRounds && (
+                  <span style={{ fontSize: 11, fontWeight: 400, color: 'var(--text-light)' }}>
+                    after {history.length} round{history.length !== 1 ? 's' : ''}
+                  </span>
+                )}
               </div>
               <div style={{ height: 3, background: 'var(--border)', borderRadius: 2, marginBottom: 8 }}>
                 <div style={{ height: '100%', borderRadius: 2, width: `${chunk.score}%`, background: tier.type === 'strong' ? 'var(--green)' : tier.type === 'adequate' ? 'var(--amber)' : 'var(--red)', transition: 'width 0.5s' }} />
               </div>
+              {/* Score evolution timeline */}
+              {hasMultipleRounds && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 0, marginBottom: 8, padding: '8px 12px', background: 'var(--bg)', borderRadius: 4, border: '1px solid var(--border-light)' }}>
+                  {history.map((s, i) => {
+                    const improved = i > 0 && s > history[i - 1];
+                    const declined = i > 0 && s < history[i - 1];
+                    const sTier = scoreTier(s);
+                    return (
+                      <span key={i} style={{ display: 'flex', alignItems: 'center' }}>
+                        {i > 0 && (
+                          <span style={{ margin: '0 8px', fontSize: 12, color: improved ? 'var(--green)' : declined ? 'var(--red)' : 'var(--text-muted)' }}>
+                            {improved ? '\u2192' : declined ? '\u2192' : '\u2192'}
+                          </span>
+                        )}
+                        <span style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+                          <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: 0.5, textTransform: 'uppercase', color: 'var(--text-muted)' }}>
+                            {i === 0 ? 'Initial' : `Round ${i + 1}`}
+                          </span>
+                          <span style={{
+                            fontFamily: "'Karla', sans-serif", fontSize: 14, fontWeight: 700,
+                            color: sTier.type === 'strong' ? 'var(--green)' : sTier.type === 'adequate' ? 'var(--amber)' : 'var(--red)',
+                          }}>
+                            {s}%
+                          </span>
+                        </span>
+                      </span>
+                    );
+                  })}
+                </div>
+              )}
               <div style={{ fontSize: 11, fontWeight: 300, color: 'var(--text-light)', lineHeight: 1.55 }}>
                 {tier.desc}{' '}
-                <span style={{ color: 'var(--text-muted)' }}>Reviewer 2 scores terminology, punctuation, tone, and historical accuracy against 79+ BAPS correction examples. ≥85% meets publication standard.</span>
+                <span style={{ color: 'var(--text-muted)' }}>Scores terminology, punctuation, tone, style, and historical accuracy against BAPS certification checklist. \u226593% meets publication standard.</span>
               </div>
             </div>
           )}
@@ -423,7 +490,7 @@ function ChunkCard({ chunk, expanded, onToggle }: { chunk: ChunkData; expanded: 
           {hasR1 && (chunk.reviewer1!.categories.length > 0 || chunk.reviewer1!.pitfalls.length > 0) && (
             <div style={{ marginBottom: 16 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
-                <span style={{ ...labelStyle, marginBottom: 0 }}>Certification Audit — Reviewer 1</span>
+                <span style={{ ...labelStyle, marginBottom: 0 }}>Certification Audit</span>
                 {certifiable
                   ? <span style={badgeStyle('strong')}>✓ Certified</span>
                   : <span style={badgeStyle('adequate')}>{passedCats}/{totalCats} passed</span>
@@ -604,31 +671,65 @@ export default function Home() {
             updateStage('reviewer', { status: 'running', msg: 'Running BAPS certification + style audit (parallel)\u2026', progress: 0 });
           } else if (ev.status === 'rechecking') {
             const n = ev.count as number, round = ev.round as number;
-            updateStage('reviewer', { status: 'running', msg: `Re-reviewing ${n} chunk${n !== 1 ? 's' : ''} scoring below 93% (round ${round})\u2026` });
+            const lowIndices = Object.values(chunkMap.current)
+              .filter(c => c.score !== undefined && c.score < 93)
+              .map(c => c.index + 1);
+            const chunkList = lowIndices.length <= 5 ? lowIndices.join(', ') : `${lowIndices.slice(0, 5).join(', ')}\u2026`;
+            updateStage('reviewer', { status: 'running', msg: `Round ${round + 1}: Re-reviewing ${n} chunk${n !== 1 ? 's' : ''} below 93% (chunk${n !== 1 ? 's' : ''} ${chunkList})\u2026`, progress: null });
+            // Mark chunks as actively reviewing
+            for (const c of Object.values(chunkMap.current)) {
+              if (c.score !== undefined && c.score < 93) {
+                chunkMap.current[c.index] = { ...chunkMap.current[c.index], reviewing: true };
+              }
+            }
+            setChunks(Object.values(chunkMap.current).sort((a, b) => a.index - b.index));
           } else if (ev.status === 'progress') {
             const done = ev.completed as number, tot = ev.total as number;
             const recheck = ev.recheck as boolean | undefined;
-            updateStage('reviewer', { status: 'running', msg: recheck ? `Re-reviewed chunk \u2014 correcting issues\u2026` : `Reviewed ${done} of ${tot} chunks\u2026`, progress: Math.round(done / tot * 100) });
             const idx = ev.index as number;
+            const newScore = ev.score as number;
+            const round = ev.round as number | undefined;
+            const prev = chunkMap.current[idx];
+            const prevHistory = prev.scoreHistory ?? [];
+            // On first review, initialize history; on re-review, append
+            const scoreHistory = recheck ? [...prevHistory, newScore] : [newScore];
+
+            if (recheck) {
+              const prevScore = prevHistory[prevHistory.length - 1] ?? prev.score ?? 0;
+              const delta = newScore - prevScore;
+              const arrow = delta > 0 ? '\u2191' : delta < 0 ? '\u2193' : '\u2192';
+              updateStage('reviewer', { status: 'running', msg: `Round ${(round ?? 1) + 1}: Chunk ${idx + 1} re-reviewed \u2014 ${prevScore}% ${arrow} ${newScore}%`, progress: Math.round(done / tot * 100) });
+            } else {
+              updateStage('reviewer', { status: 'running', msg: `Reviewed ${done} of ${tot} chunks\u2026`, progress: Math.round(done / tot * 100) });
+            }
+
             chunkMap.current[idx] = {
-              ...chunkMap.current[idx],
+              ...prev,
               reviewer1: {
                 categories:  ev.categories  as Reviewer1Category[],
                 pitfalls:    ev.pitfalls    as string[],
-                score:       ev.score       as number,
+                score:       newScore,
                 certifiable: ev.certifiable as boolean,
               },
-              score: ev.score as number,
+              score: newScore,
               issues: ev.issues as string[],
               revised: ev.revised as string,
-              approved: (ev.score as number) >= 93,
+              approved: newScore >= 93,
+              scoreHistory,
+              reviewRound: round ?? 0,
+              reviewing: false,
             };
             setChunks(Object.values(chunkMap.current).sort((a, b) => a.index - b.index));
           } else if (ev.status === 'done') {
             const avg = Math.round(ev.avgScore as number);
             const certCount = ev.certCount as number, total = ev.total as number;
             const rechecked = ev.rechecked as number;
+            // Clear reviewing flags
+            for (const c of Object.values(chunkMap.current)) {
+              if (c.reviewing) chunkMap.current[c.index] = { ...chunkMap.current[c.index], reviewing: false };
+            }
             updateStage('reviewer', { status: 'done', msg: `Review complete \u2014 ${certCount}/${total} certified, avg ${avg}%${rechecked > 0 ? ` (${rechecked} re-reviewed)` : ''}`, progress: 100 });
+            setChunks(Object.values(chunkMap.current).sort((a, b) => a.index - b.index));
           }
         }
 

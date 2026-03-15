@@ -33,8 +33,8 @@ function callClaudeExtract(
       : { type: 'document', source: { type: 'base64', media_type: mediaType, data: base64 } };
 
     const body = JSON.stringify({
-      model:      'claude-sonnet-4-20250514',
-      max_tokens: 32000, // was 8192 — insufficient for multi-page PDFs
+      model:      'claude-haiku-4-5-20251001', // Haiku: fast extraction, Sonnet reserved for translation
+      max_tokens: 16000,
       messages: [{ role: 'user', content: [contentBlock, { type: 'text', text: prompt }] }],
     });
 

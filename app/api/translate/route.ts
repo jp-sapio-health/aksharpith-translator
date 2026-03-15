@@ -11,7 +11,8 @@ export const maxDuration = 300;
 const OPUS   = 'claude-opus-4-20250514';
 const SONNET = 'claude-sonnet-4-20250514';
 const HAIKU  = 'claude-haiku-4-5-20251001';
-const BATCH  = 3;                // parallel chunk concurrency
+const BATCH  = 5;                // parallel chunk concurrency
+const SEQ_CHUNKS = 1;            // translate first N chunks sequentially for memory
 const RECHECK_THRESHOLD = 93;   // re-review chunks scoring below this
 const MAX_REVIEW_ROUNDS = 2;    // max iterative review rounds per chunk
 const API_TIMEOUT_MS    = 120_000; // 120s per Claude call
@@ -385,26 +386,100 @@ interface ReviewResult {
 }
 
 async function reviewerAgent(apiKey: string, original: string, translation: string): Promise<ReviewResult> {
-  // Fallback score is 0 (not 75) so it always triggers re-review on parse failure
-  const fallback: ReviewResult = { categories: [], pitfalls: [], issues: [], score: 0, revised: translation, certifiable: false };
-  const raw = await callClaude({
-    model: OPUS, max_tokens: 8192, apiKey,
-    system: REVIEWER_SYSTEM,
-    messages: [{ role: 'user', content: `GUJARATI SOURCE:\n${original}\n\nTRANSLATION TO AUDIT:\n${translation}` }],
-  });
-  const match = raw.match(/\{[\s\S]*\}/);
-  if (!match) return fallback;
+  const fallback: ReviewResult = { categories: [], pitfalls: [], issues: [], score: 50, revised: translation, certifiable: false };
+  let raw: string;
   try {
-    const p = JSON.parse(match[0]);
+    raw = await callClaude({
+      model: OPUS, max_tokens: 16000, apiKey,
+      system: REVIEWER_SYSTEM,
+      messages: [{ role: 'user', content: `GUJARATI SOURCE:\n${original}\n\nTRANSLATION TO AUDIT:\n${translation}` }],
+    });
+  } catch (err) {
+    console.error('Reviewer API call failed:', err instanceof Error ? err.message : err);
+    return fallback;
+  }
+
+  // Try to extract JSON object from the response
+  const match = raw.match(/\{[\s\S]*\}/);
+  if (!match) {
+    console.error('Reviewer returned no JSON object. Raw response (first 500 chars):', raw.slice(0, 500));
+    return fallback;
+  }
+
+  let jsonStr = match[0];
+
+  // Attempt standard parse first
+  try {
+    const p = JSON.parse(jsonStr);
     return {
       categories:  Array.isArray(p.categories) ? p.categories : [],
       pitfalls:    Array.isArray(p.pitfalls) ? p.pitfalls.filter((s: unknown) => typeof s === 'string') : [],
       issues:      Array.isArray(p.issues) ? p.issues.filter((s: unknown) => typeof s === 'string') : [],
-      score:       typeof p.score === 'number' ? Math.max(0, Math.min(100, p.score)) : 0,
+      score:       typeof p.score === 'number' ? Math.max(0, Math.min(100, p.score)) : 50,
       revised:     typeof p.revised === 'string' && p.revised.trim() ? p.revised.trim() : translation,
       certifiable: typeof p.certifiable === 'boolean' ? p.certifiable : false,
     };
-  } catch { return fallback; }
+  } catch {
+    // JSON parse failed — likely truncated response. Try to salvage what we can.
+    console.error('Reviewer JSON parse failed (likely truncated). Attempting partial extraction. Raw length:', raw.length, 'First 300 chars:', raw.slice(0, 300));
+
+    // Try to extract score
+    let score = 50;
+    const scoreMatch = jsonStr.match(/"score"\s*:\s*(\d+)/);
+    if (scoreMatch) {
+      score = Math.max(0, Math.min(100, parseInt(scoreMatch[1], 10)));
+    }
+
+    // Try to extract revised text (may be truncated)
+    let revised = translation; // default: use original translation
+    const revisedMatch = jsonStr.match(/"revised"\s*:\s*"([\s\S]*?)(?:"\s*[,}]|$)/);
+    if (revisedMatch && revisedMatch[1].trim().length > 50) {
+      // Only use extracted revised if it's substantial enough
+      try {
+        // Unescape JSON string escapes
+        revised = JSON.parse(`"${revisedMatch[1]}"`);
+      } catch {
+        // If unescape fails, use original translation
+        revised = translation;
+      }
+    }
+
+    // Try to extract certifiable
+    let certifiable = false;
+    const certMatch = jsonStr.match(/"certifiable"\s*:\s*(true|false)/);
+    if (certMatch) {
+      certifiable = certMatch[1] === 'true';
+    }
+
+    // Try to extract categories
+    let categories: ReviewResult['categories'] = [];
+    try {
+      const catMatch = jsonStr.match(/"categories"\s*:\s*\[[\s\S]*?\]/);
+      if (catMatch) {
+        categories = JSON.parse(catMatch[0].replace(/^"categories"\s*:\s*/, ''));
+      }
+    } catch { /* ignore */ }
+
+    // Try to extract pitfalls
+    let pitfalls: string[] = [];
+    try {
+      const pitMatch = jsonStr.match(/"pitfalls"\s*:\s*\[[\s\S]*?\]/);
+      if (pitMatch) {
+        pitfalls = JSON.parse(pitMatch[0].replace(/^"pitfalls"\s*:\s*/, '')).filter((s: unknown) => typeof s === 'string');
+      }
+    } catch { /* ignore */ }
+
+    // Try to extract issues
+    let issues: string[] = [];
+    try {
+      const issMatch = jsonStr.match(/"issues"\s*:\s*\[[\s\S]*?\]/);
+      if (issMatch) {
+        issues = JSON.parse(issMatch[0].replace(/^"issues"\s*:\s*/, '')).filter((s: unknown) => typeof s === 'string');
+      }
+    } catch { /* ignore */ }
+
+    return { categories, pitfalls, issues, score, revised, certifiable };
+  }
 }
 
 async function smootherAgent(apiKey: string, text: string): Promise<string> {
@@ -492,66 +567,93 @@ export async function POST(req: NextRequest) {
         if (chunks.length === 0) { send({ error: 'No content to translate' }); return; }
         send({ stage: 'chunker', status: 'done', count: chunks.length, chunks, context });
 
-        // ── Stage 2: Translator (Opus, sequential — cross-chunk memory) ─
-        send({ stage: 'translator', status: 'running' });
+        // ── Stages 2-4: Pipelined per-chunk processing ──────────────────
         const translations: string[] = new Array(chunks.length).fill('');
+        const reviews: ReviewResult[] = new Array(chunks.length);
+        const smoothedChunks: string[] = new Array(chunks.length).fill('');
         let translationMemory = '';
 
-        for (let i = 0; i < chunks.length; i++) {
+        // Stage completion tracking
+        let translateDone = 0, reviewDone = 0, smoothDone = 0;
+        let translatorStarted = false, reviewerStarted = false, smootherStarted = false;
+        let translatorFinished = false, reviewerFinished = false, smootherFinished = false;
+        let totalRechecks = 0;
+
+        async function processChunk(i: number) {
+          // ── Translate ──
+          if (!translatorStarted) { translatorStarted = true; send({ stage: 'translator', status: 'running' }); }
           translations[i] = await translatorAgent(apiKey, chunks[i], translationMemory, i, chunks.length);
-          send({ stage: 'translator', status: 'progress', current: i + 1, total: chunks.length, index: i, translation: translations[i] });
-          if (i < chunks.length - 1) {
-            try {
-              const mem = await extractTranslationMemory(apiKey, chunks[i], translations[i]);
-              if (mem) translationMemory = (translationMemory + '\n' + mem).trim().slice(-2000);
-            } catch { /* non-critical — continue without memory */ }
+          translateDone++;
+          send({ stage: 'translator', status: 'progress', current: translateDone, total: chunks.length, index: i, translation: translations[i] });
+          if (translateDone === chunks.length && !translatorFinished) {
+            translatorFinished = true;
+            send({ stage: 'translator', status: 'done', memorySize: translationMemory.length });
+          }
+
+          // ── Review ──
+          if (!reviewerStarted) { reviewerStarted = true; send({ stage: 'reviewer', status: 'running' }); }
+          reviews[i] = await reviewerAgent(apiKey, chunks[i], translations[i]);
+          send({ stage: 'reviewer', status: 'progress', completed: reviewDone + 1, total: chunks.length, index: i, categories: reviews[i].categories, pitfalls: reviews[i].pitfalls, issues: reviews[i].issues, score: reviews[i].score, certifiable: reviews[i].certifiable });
+
+          // ── Re-review loop ──
+          for (let round = 1; round <= MAX_REVIEW_ROUNDS && reviews[i].score < RECHECK_THRESHOLD; round++) {
+            totalRechecks++;
+            send({ stage: 'reviewer', status: 'progress', completed: reviewDone, total: chunks.length, index: i, categories: reviews[i].categories, pitfalls: reviews[i].pitfalls, issues: reviews[i].issues, score: reviews[i].score, certifiable: reviews[i].certifiable, recheck: true, round });
+            reviews[i] = await reviewerAgent(apiKey, chunks[i], reviews[i].revised);
+            send({ stage: 'reviewer', status: 'progress', completed: reviewDone, total: chunks.length, index: i, categories: reviews[i].categories, pitfalls: reviews[i].pitfalls, issues: reviews[i].issues, score: reviews[i].score, certifiable: reviews[i].certifiable, recheck: true, round });
+          }
+
+          reviewDone++;
+          if (reviewDone === chunks.length && !reviewerFinished) {
+            reviewerFinished = true;
+            const certCount = reviews.filter(r => r.certifiable).length;
+            const avgScore = chunks.length > 0 ? reviews.reduce((s, r) => s + r.score, 0) / chunks.length : 0;
+            send({ stage: 'reviewer', status: 'done', certCount, total: chunks.length, avgScore, rechecked: totalRechecks });
+          }
+
+          // ── Smooth (always run on every chunk) ──
+          if (!smootherStarted) { smootherStarted = true; send({ stage: 'smoother', status: 'running' }); }
+          smoothedChunks[i] = await smootherAgent(apiKey, reviews[i].revised);
+          smoothDone++;
+          send({ stage: 'smoother', status: 'progress', completed: smoothDone, total: chunks.length, index: i });
+          if (smoothDone === chunks.length && !smootherFinished) {
+            smootherFinished = true;
+            send({ stage: 'smoother', status: 'done' });
           }
         }
-        send({ stage: 'translator', status: 'done', memorySize: translationMemory.length });
 
-        // ── Stage 3: Reviewer (Opus, parallel — cert + style in one pass) ─
-        send({ stage: 'reviewer', status: 'running' });
-        const reviews: ReviewResult[] = new Array(chunks.length);
-        let revDone = 0;
+        // Process chunk 0 sequentially for translation memory
+        await processChunk(0);
 
-        await parallelBatch(chunks, async (_, i) => {
-          reviews[i] = await reviewerAgent(apiKey, chunks[i], translations[i]);
-          revDone++;
-          send({ stage: 'reviewer', status: 'progress', completed: revDone, total: chunks.length, index: i, categories: reviews[i].categories, pitfalls: reviews[i].pitfalls, issues: reviews[i].issues, score: reviews[i].score, certifiable: reviews[i].certifiable });
-        }, BATCH);
-
-        // ── Iterative refinement: re-review until score ≥ 93 or 2 rounds ─
-        let totalRechecks = 0;
-        for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
-          const lowChunks = reviews.map((_, i) => i).filter(i => reviews[i].score < RECHECK_THRESHOLD);
-          if (lowChunks.length === 0) break;
-
-          send({ stage: 'reviewer', status: 'rechecking', count: lowChunks.length, round });
-          totalRechecks += lowChunks.length;
-
-          await parallelBatch(lowChunks, async (i) => {
-            reviews[i] = await reviewerAgent(apiKey, chunks[i], reviews[i].revised);
-            send({ stage: 'reviewer', status: 'progress', completed: revDone, total: chunks.length, index: i, categories: reviews[i].categories, pitfalls: reviews[i].pitfalls, issues: reviews[i].issues, score: reviews[i].score, certifiable: reviews[i].certifiable, recheck: true, round });
-          }, BATCH);
+        // Extract translation memory from first chunk
+        if (chunks.length > 1) {
+          try {
+            const mem = await extractTranslationMemory(apiKey, chunks[0], translations[0]);
+            if (mem) translationMemory = mem.slice(-2000);
+          } catch { /* ignore memory extraction failure */ }
         }
 
-        const certCount = reviews.filter(r => r.certifiable).length;
-        const avgScore = chunks.length > 0 ? reviews.reduce((s, r) => s + r.score, 0) / chunks.length : 0;
-        send({ stage: 'reviewer', status: 'done', certCount, total: chunks.length, avgScore, rechecked: totalRechecks });
+        // Process remaining chunks in parallel through the full pipeline
+        if (chunks.length > 1) {
+          const remaining = Array.from({ length: chunks.length - 1 }, (_, i) => i + 1);
+          await parallelBatch(remaining, async (i) => processChunk(i), BATCH);
+        }
 
-        // ── Stage 4: Smoother (Sonnet, parallel) ────────────────────────
-        send({ stage: 'smoother', status: 'running' });
-        const smoothedChunks: string[] = new Array(chunks.length);
-        let smDone = 0;
-
-        await parallelBatch(reviews, async (_, i) => {
-          smoothedChunks[i] = await smootherAgent(apiKey, reviews[i].revised);
-          smDone++;
-          send({ stage: 'smoother', status: 'progress', completed: smDone, total: reviews.length, index: i });
-        }, BATCH);
-        send({ stage: 'smoother', status: 'done' });
+        // Ensure all stage-done events fire even for single-chunk case
+        if (!translatorFinished) { translatorFinished = true; send({ stage: 'translator', status: 'done', memorySize: translationMemory.length }); }
+        if (!reviewerFinished) {
+          reviewerFinished = true;
+          const certCount = reviews.filter(r => r.certifiable).length;
+          const avgScore = chunks.length > 0 ? reviews.reduce((s, r) => s + r.score, 0) / chunks.length : 0;
+          send({ stage: 'reviewer', status: 'done', certCount, total: chunks.length, avgScore, rechecked: totalRechecks });
+        }
+        if (!smootherFinished) {
+          smootherFinished = true;
+          send({ stage: 'smoother', status: 'done' });
+        }
 
         // ── Stage 5: Assembler (Sonnet) ─────────────────────────────────
+        const avgScore = chunks.length > 0 ? reviews.reduce((s, r) => s + r.score, 0) / chunks.length : 0;
         send({ stage: 'assembler', status: 'running' });
         const assembled = await assemblerAgent(apiKey, smoothedChunks);
         const finalWords = assembled.trim().split(/\s+/).filter(Boolean).length;

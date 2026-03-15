@@ -896,15 +896,18 @@ export default function Home() {
 
       {/* Header */}
       <header ref={headerRef} style={{ background: 'var(--bg-white)', borderBottom: '1px solid var(--border)', position: 'sticky', top: 0, zIndex: 100, padding: '14px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div>
-          <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: 3, textTransform: 'uppercase', color: 'var(--text-light)', marginBottom: 2 }}>
-            BAPS Swaminarayan · Aksharpith
-          </div>
-          <div style={{ fontFamily: '"Cormorant Garamond", serif', fontWeight: 300, fontSize: 26, color: 'var(--text)', letterSpacing: '-0.3px' }}>
-            Translation <em>Pipeline</em>
-            <span style={{ fontFamily: "'Karla', sans-serif", fontSize: 10, fontWeight: 600, letterSpacing: 1, color: 'var(--text-light)', marginLeft: 12, verticalAlign: 'middle' }}>
-              5 AGENTS \u00b7 GOLD STANDARD
-            </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+          <img src="/baps-logo.png" alt="BAPS" style={{ height: 44, width: 'auto', opacity: 0.85 }} />
+          <div>
+            <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: 3, textTransform: 'uppercase', color: 'var(--text-light)', marginBottom: 2 }}>
+              BAPS Swaminarayan \u00b7 Aksharpith
+            </div>
+            <div style={{ fontFamily: '"Cormorant Garamond", serif', fontWeight: 300, fontSize: 26, color: 'var(--text)', letterSpacing: '-0.3px' }}>
+              Translation <em>Pipeline</em>
+              <span style={{ fontFamily: "'Karla', sans-serif", fontSize: 10, fontWeight: 600, letterSpacing: 1, color: 'var(--text-light)', marginLeft: 12, verticalAlign: 'middle' }}>
+                5 AGENTS \u00b7 GOLD STANDARD
+              </span>
+            </div>
           </div>
         </div>
         {user && (

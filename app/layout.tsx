@@ -5,6 +5,10 @@ import { AuthProvider } from '../lib/auth-context';
 export const metadata: Metadata = {
   title: 'Aksharpith Translation Pipeline',
   description: 'Gujarati to English AI translation pipeline — Aksharpith house style',
+  icons: {
+    icon: '/favicon.ico',
+    apple: '/apple-icon.png',
+  },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

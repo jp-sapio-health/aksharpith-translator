@@ -11,7 +11,7 @@ type Tab = 'input' | 'pipeline' | 'output';
 type InputMode = 'paste' | 'upload';
 
 interface StageState {
-  id: 'chunker' | 'translator' | 'reviewer1' | 'reviewer2' | 'smoother' | 'assembler';
+  id: 'chunker' | 'translator' | 'reviewer' | 'smoother' | 'assembler';
   num: string; label: string; tagline: string;
   status: StageStatus; msg: string; progress: number | null;
 }
@@ -34,12 +34,11 @@ interface ChapterResult {
 // ── Constants ──────────────────────────────────────────────────────────────────
 
 const INITIAL_STAGES: StageState[] = [
-  { id: 'chunker',    num: '01', label: 'Chunker',             tagline: 'Splits text at paragraph and verse boundaries into ≤500-word segments', status: 'waiting', msg: '', progress: null },
-  { id: 'translator', num: '02', label: 'Translator',          tagline: 'Translates each chunk — trustee-of-tradition mindset, full BAPS glossary enforced', status: 'waiting', msg: '', progress: null },
-  { id: 'reviewer1',  num: '03', label: 'Certification Audit', tagline: 'BAPS Translation Certification Checklist — 8 categories, 20 common pitfalls', status: 'waiting', msg: '', progress: null },
-  { id: 'reviewer2',  num: '04', label: 'Style Review',        tagline: 'House-style rules, 79+ before/after correction examples, all mandatory terminology', status: 'waiting', msg: '', progress: null },
-  { id: 'smoother',   num: '05', label: 'Smoother',            tagline: 'Readability pass — natural flow and transitions, without altering meaning', status: 'waiting', msg: '', progress: null },
-  { id: 'assembler',  num: '06', label: 'Assembler',           tagline: 'Joins all chunks into a single publication-ready document', status: 'waiting', msg: '', progress: null },
+  { id: 'chunker',    num: '01', label: 'Chunker',    tagline: 'Splits text at paragraph and verse boundaries into \u2264500-word segments', status: 'waiting', msg: '', progress: null },
+  { id: 'translator', num: '02', label: 'Translator', tagline: 'Translates each chunk \u2014 trustee-of-tradition mindset, full BAPS glossary enforced', status: 'waiting', msg: '', progress: null },
+  { id: 'reviewer',   num: '03', label: 'Reviewer',   tagline: 'BAPS certification (8 categories, 20 pitfalls) + style and register audit in one pass', status: 'waiting', msg: '', progress: null },
+  { id: 'smoother',   num: '04', label: 'Smoother',   tagline: 'Readability pass \u2014 natural flow and transitions, without altering meaning', status: 'waiting', msg: '', progress: null },
+  { id: 'assembler',  num: '05', label: 'Assembler',  tagline: 'Joins all chunks into a single publication-ready document', status: 'waiting', msg: '', progress: null },
 ];
 
 const SAMPLE = `પ્રેમે પ્રગટ્યા રે સૂરજ સહજાનંદ, અધર્મ અંધારું ટાળિયું...
@@ -599,13 +598,17 @@ export default function Home() {
           }
         }
 
-        // ── Reviewer 1 (Certification Audit) — parallel ─────────────
-        if (ev.stage === 'reviewer1') {
+        // ── Reviewer (combined cert + style) — parallel ─────────────
+        if (ev.stage === 'reviewer') {
           if (ev.status === 'running') {
-            updateStage('reviewer1', { status: 'running', msg: 'Running BAPS Certification Checklist (parallel)…', progress: 0 });
+            updateStage('reviewer', { status: 'running', msg: 'Running BAPS certification + style audit (parallel)\u2026', progress: 0 });
+          } else if (ev.status === 'rechecking') {
+            const n = ev.count as number, round = ev.round as number;
+            updateStage('reviewer', { status: 'running', msg: `Re-reviewing ${n} chunk${n !== 1 ? 's' : ''} scoring below 93% (round ${round})\u2026` });
           } else if (ev.status === 'progress') {
             const done = ev.completed as number, tot = ev.total as number;
-            updateStage('reviewer1', { status: 'running', msg: `Audited ${done} of ${tot} chunks — 8 categories, 20 pitfalls…`, progress: Math.round(done / tot * 100) });
+            const recheck = ev.recheck as boolean | undefined;
+            updateStage('reviewer', { status: 'running', msg: recheck ? `Re-reviewed chunk \u2014 correcting issues\u2026` : `Reviewed ${done} of ${tot} chunks\u2026`, progress: Math.round(done / tot * 100) });
             const idx = ev.index as number;
             chunkMap.current[idx] = {
               ...chunkMap.current[idx],
@@ -615,32 +618,17 @@ export default function Home() {
                 score:       ev.score       as number,
                 certifiable: ev.certifiable as boolean,
               },
+              score: ev.score as number,
+              issues: ev.issues as string[],
+              revised: ev.revised as string,
+              approved: (ev.score as number) >= 93,
             };
             setChunks(Object.values(chunkMap.current).sort((a, b) => a.index - b.index));
           } else if (ev.status === 'done') {
-            const certCount = ev.certCount as number, total = ev.total as number;
-            updateStage('reviewer1', { status: 'done', msg: `Certification complete — ${certCount} of ${total} chunk${total !== 1 ? 's' : ''} certified`, progress: 100 });
-          }
-        }
-
-        // ── Reviewer 2 (Style Review) — parallel + double-loop ──────
-        if (ev.stage === 'reviewer2') {
-          if (ev.status === 'running') {
-            updateStage('reviewer2', { status: 'running', msg: 'Style and register review (parallel)…', progress: 0 });
-          } else if (ev.status === 'rechecking') {
-            const n = ev.count as number;
-            updateStage('reviewer2', { status: 'running', msg: `Re-reviewing ${n} chunk${n !== 1 ? 's' : ''} scoring below 80% (double-loop)…` });
-          } else if (ev.status === 'progress') {
-            const done = ev.completed as number, tot = ev.total as number;
-            const recheck = ev.recheck as boolean | undefined;
-            updateStage('reviewer2', { status: 'running', msg: recheck ? `Re-reviewed chunk — correcting style issues…` : `Reviewed ${done} of ${tot} chunks…`, progress: Math.round(done / tot * 100) });
-            const idx = ev.index as number;
-            chunkMap.current[idx] = { ...chunkMap.current[idx], score: ev.score as number, issues: ev.issues as string[], revised: ev.revised as string, approved: (ev.score as number) >= 85 };
-            setChunks(Object.values(chunkMap.current).sort((a, b) => a.index - b.index));
-          } else if (ev.status === 'done') {
             const avg = Math.round(ev.avgScore as number);
+            const certCount = ev.certCount as number, total = ev.total as number;
             const rechecked = ev.rechecked as number;
-            updateStage('reviewer2', { status: 'done', msg: `Style review complete — avg ${avg}%${rechecked > 0 ? ` (${rechecked} re-reviewed)` : ''}`, progress: 100 });
+            updateStage('reviewer', { status: 'done', msg: `Review complete \u2014 ${certCount}/${total} certified, avg ${avg}%${rechecked > 0 ? ` (${rechecked} re-reviewed)` : ''}`, progress: 100 });
           }
         }
 

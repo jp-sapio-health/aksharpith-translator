@@ -12,8 +12,8 @@ const OPUS   = 'claude-opus-4-20250514';
 const SONNET = 'claude-sonnet-4-20250514';
 const HAIKU  = 'claude-haiku-4-5-20251001';
 const BATCH  = 3;                // parallel chunk concurrency
-const RECHECK_THRESHOLD = 95;   // re-review chunks scoring below this
-const MAX_REVIEW_ROUNDS = 3;    // max iterative R1→R2 rounds per chunk
+const RECHECK_THRESHOLD = 93;   // re-review chunks scoring below this
+const MAX_REVIEW_ROUNDS = 2;    // max iterative review rounds per chunk
 
 // ─── Anthropic API helper ──────────────────────────────────────────────────────
 
@@ -177,8 +177,6 @@ vichran: Travels/tours of a spiritual leader (BAPS spelling)`;
 // BAPS terms the smoother and assembler must never replace
 const PROTECTED_TERMS = 'mandir, seva, satsang, arti, vichran, mukhpath, katha, kirtan, dharma, moksha, bhakti, atma, maya, paramhansa, brahmisthiti, santmandal, shastra, Swamishri, Akshardham, vachanamrut';
 
-// ─── System Prompts (Bond-audited) ──────────────────────────────────────────
-
 // ─── Deterministic chunker ─────────────────────────────────────────────────
 // Splits at blank-line paragraph boundaries, targeting 300–500 words per chunk.
 // If the full text is ≤500 words, returns it as a single chunk.
@@ -221,6 +219,8 @@ function deterministicChunk(text: string): string[] {
   return chunks.length > 0 ? chunks : [text.trim()];
 }
 
+// ─── System Prompts ──────────────────────────────────────────────────────────
+
 const TRANSLATOR_SYSTEM = `You are a trustee of tradition (parampara) for Aksharpith, the publishing wing of BAPS Swaminarayan Sanstha. Your priority is FIDELITY OVER FLUENCY. You are a carrier of the original voice \u2014 not a commentator, not an editor.
 
 ${HOUSE_RULES_CONTEXT}
@@ -233,9 +233,9 @@ ALREADY-ENGLISH TEXT: If a passage in the source is already in English, reproduc
 
 MINDSET: Every sentence carries devotional, historical, and doctrinal weight. Preserve it completely. Provide ONLY the English translation \u2014 no preamble, no notes, no commentary.`;
 
-const REVIEWER1_SYSTEM = `You are a BAPS translation certification auditor. Perform a structured pre-publication certification audit.
+const REVIEWER_SYSTEM = `You are a BAPS translation auditor and senior style reviewer for Aksharpith. Perform a combined certification and style audit in a single pass.
 
-BAPS TRANSLATION CERTIFICATION CHECKLIST:
+PART 1 \u2014 BAPS CERTIFICATION CHECKLIST (8 categories):
 
 A. TERMINOLOGY \u2014 Verify mandatory terms:
    mandir (NEVER "temple") | Swami/Swamis (NEVER "saint/saints/sadhu")
@@ -248,13 +248,13 @@ B. PUNCTUATION \u2014 Curly quotes \u201c \u201d (NEVER straight) | Spaced en da
 
 C. DIACRITICS \u2014 NO macrons in prose. Only inside quoted verse.
 
-D. TONE \u2014 British English, Oxford -ize (organize, realize, colour, travelling, programme, fulfil). No American marketing. No "mythology" for sacred texts.
+D. TONE \u2014 British English, Oxford -ize (organize, realize, colour, travelling, programme, fulfil). No American marketing. No "mythology" for sacred texts. Dignified, measured, reverent register.
 
-E. FIDELITY \u2014 Nothing added/omitted. Direct speech stays first-person. No commentary.
+E. FIDELITY \u2014 Nothing added/omitted. Direct speech stays first-person. No commentary. No paraphrasing.
 
 F. VERSE \u2014 Transliteration FIRST, then English meaning. Full reproduction, no truncation.
 
-G. HISTORICAL \u2014 Exact dates/times. Place names: Chansad, Bamangam, Dhuliya, Dangara. Era-correct names.
+G. HISTORICAL \u2014 Exact dates/times. Place names: Chansad, Bamangam, Dhuliya, Dangara, Bhadrod. Era-correct names (e.g. "Bombay Province" not "Mumbai").
 
 H. COMPLETENESS \u2014 All paragraphs translated, no truncation.
 
@@ -266,26 +266,23 @@ COMMON PITFALLS (check each):
 14. mythology 15. aarti\u2192arti 16. vicharan\u2192vichran 17. torchbearer\u2192successor
 18. place name misspellings 19. American spellings 20. satsang\u2192fellowship
 
-SCORING: Start at 100. Deduct per issue (minor: 3\u20135pts, major: 8\u201312pts, critical: 15\u201320pts).
+PART 2 \u2014 STYLE AND REGISTER:
+
+1. REGISTER: Flag casual, promotional, or American-register phrasing.
+2. PROSE QUALITY: Flag awkward calques from Gujarati syntax, overly literal phrasing, or unnatural English.
+3. CONSISTENCY: Flag inconsistent term renderings across the passage.
+4. FLOW: Flag abrupt jumps or choppy prose.
+
+SCORING: Start at 100. Deduct per issue:
+- Minor (spelling, punctuation): 3\u20135 pts
+- Major (wrong term, register violation, consistency): 8\u201312 pts
+- Critical (fidelity error, omission, added commentary): 15\u201320 pts
 Set "certifiable" to true only if ALL 8 categories pass AND zero pitfalls found.
-Produce a corrected revised translation fixing ALL issues.
+
+Produce a corrected revised translation fixing ALL certification and style issues.
 
 Return ONLY valid JSON (no fences):
-{"categories": [{"id": "...", "name": "...", "pass": true, "issues": []}], "pitfalls": [], "score": <0-100>, "revised": "...", "certifiable": false}`;
-
-const REVIEWER2_SYSTEM = `You are a senior style reviewer for Aksharpith. The translation has already passed a BAPS certification audit for terminology, diacritics, and punctuation. Your role is STYLE AND REGISTER only.
-
-CHECK THESE DIMENSIONS:
-1. REGISTER: Is the tone consistently dignified, measured, and reverent? Flag casual, promotional, or American-register phrasing.
-2. PROSE QUALITY: Are sentences well-constructed? Flag awkward calques from Gujarati syntax, overly literal phrasing, or unnatural English.
-3. CONSISTENCY: Are the same terms rendered the same way throughout? Flag inconsistent renderings.
-4. BRITISH ENGLISH: Verify Oxford -ize spellings (organize, realize) and British forms (colour, travelling, programme).
-5. FLOW: Do paragraphs transition naturally? Flag abrupt jumps or choppy prose.
-
-SCORING: Start at 100. Deduct 3pts per minor style issue, 8pts per register violation, 12pts per consistency error.
-
-Return ONLY valid JSON (no fences):
-{"score": <0-100>, "issues": ["issue 1", ...], "revised": "<improved translation>"}`;
+{"categories": [{"id": "A", "name": "Terminology", "pass": true, "issues": []}, ...], "pitfalls": [], "issues": [], "score": <0-100>, "revised": "...", "certifiable": false}`;
 
 const SMOOTHER_SYSTEM = `You are a senior editorial reader for Aksharpith performing a final readability pass.
 
@@ -343,21 +340,20 @@ async function translatorAgent(
   });
 }
 
-interface ReviewResult { score: number; issues: string[]; revised: string; }
-
-interface Reviewer1Result {
+interface ReviewResult {
   categories: Array<{ id: string; name: string; pass: boolean; issues: string[] }>;
   pitfalls: string[];
+  issues: string[];
   score: number;
   revised: string;
   certifiable: boolean;
 }
 
-async function reviewer1Agent(apiKey: string, original: string, translation: string): Promise<Reviewer1Result> {
-  const fallback: Reviewer1Result = { categories: [], pitfalls: [], score: 75, revised: translation, certifiable: false };
+async function reviewerAgent(apiKey: string, original: string, translation: string): Promise<ReviewResult> {
+  const fallback: ReviewResult = { categories: [], pitfalls: [], issues: [], score: 75, revised: translation, certifiable: false };
   const raw = await callClaude({
     model: OPUS, max_tokens: 8192, apiKey,
-    system: REVIEWER1_SYSTEM,
+    system: REVIEWER_SYSTEM,
     messages: [{ role: 'user', content: `GUJARATI SOURCE:\n${original}\n\nTRANSLATION TO AUDIT:\n${translation}` }],
   });
   const match = raw.match(/\{[\s\S]*\}/);
@@ -367,29 +363,12 @@ async function reviewer1Agent(apiKey: string, original: string, translation: str
     return {
       categories:  Array.isArray(p.categories) ? p.categories : [],
       pitfalls:    Array.isArray(p.pitfalls) ? p.pitfalls.filter((s: unknown) => typeof s === 'string') : [],
+      issues:      Array.isArray(p.issues) ? p.issues.filter((s: unknown) => typeof s === 'string') : [],
       score:       typeof p.score === 'number' ? Math.max(0, Math.min(100, p.score)) : 75,
       revised:     typeof p.revised === 'string' && p.revised.trim() ? p.revised.trim() : translation,
       certifiable: typeof p.certifiable === 'boolean' ? p.certifiable : false,
     };
   } catch { return fallback; }
-}
-
-async function reviewer2Agent(apiKey: string, original: string, translation: string): Promise<ReviewResult> {
-  const raw = await callClaude({
-    model: SONNET, max_tokens: 8192, apiKey,
-    system: REVIEWER2_SYSTEM,
-    messages: [{ role: 'user', content: `ORIGINAL (Gujarati):\n${original}\n\nTRANSLATION TO REVIEW:\n${translation}` }],
-  });
-  const match = raw.match(/\{[\s\S]*\}/);
-  if (!match) return { score: 70, issues: [], revised: translation };
-  try {
-    const p = JSON.parse(match[0]);
-    return {
-      score:   typeof p.score === 'number' ? Math.max(0, Math.min(100, p.score)) : 70,
-      issues:  Array.isArray(p.issues) ? p.issues.filter((s: unknown) => typeof s === 'string') : [],
-      revised: typeof p.revised === 'string' && p.revised.trim() ? p.revised.trim() : translation,
-    };
-  } catch { return { score: 70, issues: [], revised: translation }; }
 }
 
 async function smootherAgent(apiKey: string, text: string): Promise<string> {
@@ -459,14 +438,14 @@ export async function POST(req: NextRequest) {
       }, 10000);
 
       try {
-        const context = chapterTitle ? ` — ${chapterTitle}` : '';
+        const context = chapterTitle ? ` \u2014 ${chapterTitle}` : '';
 
-        // ── Stage 1: Chunker (Haiku — fast) ────────────────────────────
+        // ── Stage 1: Chunker (deterministic) ────────────────────────────
         send({ stage: 'chunker', status: 'running' });
         const chunks = await chunkerAgent(apiKey, text);
         send({ stage: 'chunker', status: 'done', count: chunks.length, chunks, context });
 
-        // ── Stage 2: Translator (sequential — needs cross-chunk memory) ─
+        // ── Stage 2: Translator (Opus, sequential — cross-chunk memory) ─
         send({ stage: 'translator', status: 'running' });
         const translations: string[] = new Array(chunks.length).fill('');
         let translationMemory = '';
@@ -483,52 +462,37 @@ export async function POST(req: NextRequest) {
         }
         send({ stage: 'translator', status: 'done', memorySize: translationMemory.length });
 
-        // ── Stage 3: Reviewer 1 — PARALLEL ─────────────────────────────
-        send({ stage: 'reviewer1', status: 'running' });
-        const reviewer1Results: Reviewer1Result[] = new Array(chunks.length);
-        let r1Done = 0;
-
-        await parallelBatch(chunks, async (_, i) => {
-          reviewer1Results[i] = await reviewer1Agent(apiKey, chunks[i], translations[i]);
-          r1Done++;
-          send({ stage: 'reviewer1', status: 'progress', completed: r1Done, total: chunks.length, index: i, categories: reviewer1Results[i].categories, pitfalls: reviewer1Results[i].pitfalls, score: reviewer1Results[i].score, certifiable: reviewer1Results[i].certifiable });
-        }, BATCH);
-
-        const certCount = reviewer1Results.filter(r => r.certifiable).length;
-        send({ stage: 'reviewer1', status: 'done', certCount, total: chunks.length });
-
-        // ── Stage 4: Reviewer 2 — PARALLEL ─────────────────────────────
-        send({ stage: 'reviewer2', status: 'running' });
+        // ── Stage 3: Reviewer (Opus, parallel — cert + style in one pass) ─
+        send({ stage: 'reviewer', status: 'running' });
         const reviews: ReviewResult[] = new Array(chunks.length);
-        let r2Done = 0;
+        let revDone = 0;
 
         await parallelBatch(chunks, async (_, i) => {
-          reviews[i] = await reviewer2Agent(apiKey, chunks[i], reviewer1Results[i].revised);
-          r2Done++;
-          send({ stage: 'reviewer2', status: 'progress', completed: r2Done, total: chunks.length, index: i, score: reviews[i].score, issues: reviews[i].issues, revised: reviews[i].revised });
+          reviews[i] = await reviewerAgent(apiKey, chunks[i], translations[i]);
+          revDone++;
+          send({ stage: 'reviewer', status: 'progress', completed: revDone, total: chunks.length, index: i, categories: reviews[i].categories, pitfalls: reviews[i].pitfalls, issues: reviews[i].issues, score: reviews[i].score, certifiable: reviews[i].certifiable });
         }, BATCH);
 
-        // ── Iterative refinement: re-review until score ≥ threshold or max rounds ─
+        // ── Iterative refinement: re-review until score ≥ 93 or 2 rounds ─
         let totalRechecks = 0;
         for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
           const lowChunks = reviews.map((_, i) => i).filter(i => reviews[i].score < RECHECK_THRESHOLD);
           if (lowChunks.length === 0) break;
 
-          send({ stage: 'reviewer2', status: 'rechecking', count: lowChunks.length, round });
+          send({ stage: 'reviewer', status: 'rechecking', count: lowChunks.length, round });
           totalRechecks += lowChunks.length;
 
           await parallelBatch(lowChunks, async (i) => {
-            reviewer1Results[i] = await reviewer1Agent(apiKey, chunks[i], reviews[i].revised);
-            send({ stage: 'reviewer1', status: 'progress', completed: r1Done, total: chunks.length, index: i, categories: reviewer1Results[i].categories, pitfalls: reviewer1Results[i].pitfalls, score: reviewer1Results[i].score, certifiable: reviewer1Results[i].certifiable, round });
-            reviews[i] = await reviewer2Agent(apiKey, chunks[i], reviewer1Results[i].revised);
-            send({ stage: 'reviewer2', status: 'progress', completed: r2Done, total: chunks.length, index: i, score: reviews[i].score, issues: reviews[i].issues, revised: reviews[i].revised, recheck: true, round });
+            reviews[i] = await reviewerAgent(apiKey, chunks[i], reviews[i].revised);
+            send({ stage: 'reviewer', status: 'progress', completed: revDone, total: chunks.length, index: i, categories: reviews[i].categories, pitfalls: reviews[i].pitfalls, issues: reviews[i].issues, score: reviews[i].score, certifiable: reviews[i].certifiable, recheck: true, round });
           }, BATCH);
         }
 
+        const certCount = reviews.filter(r => r.certifiable).length;
         const avgScore = reviews.reduce((s, r) => s + r.score, 0) / reviews.length;
-        send({ stage: 'reviewer2', status: 'done', avgScore, rechecked: totalRechecks });
+        send({ stage: 'reviewer', status: 'done', certCount, total: chunks.length, avgScore, rechecked: totalRechecks });
 
-        // ── Stage 5: Smoother — PARALLEL ───────────────────────────────
+        // ── Stage 4: Smoother (Sonnet, parallel) ────────────────────────
         send({ stage: 'smoother', status: 'running' });
         const smoothedChunks: string[] = new Array(chunks.length);
         let smDone = 0;
@@ -540,7 +504,7 @@ export async function POST(req: NextRequest) {
         }, BATCH);
         send({ stage: 'smoother', status: 'done' });
 
-        // ── Stage 6: Assembler ─────────────────────────────────────────
+        // ── Stage 5: Assembler (Sonnet) ─────────────────────────────────
         send({ stage: 'assembler', status: 'running' });
         const assembled = await assemblerAgent(apiKey, smoothedChunks);
         const finalWords = assembled.trim().split(/\s+/).length;

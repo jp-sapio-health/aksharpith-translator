@@ -202,9 +202,22 @@ export async function POST(req: NextRequest) {
       extracted = await callClaudeExtract(apiKey, buf.toString('base64'), IMAGE_MEDIA[ext], IMAGE_PROMPT);
     }
 
-    // ── DOCX: mammoth
+    // ── DOCX: mammoth (preserving paragraph breaks)
     else if (ext === 'docx') {
-      extracted = (await mammoth.extractRawText({ buffer: buf })).value;
+      const result = await mammoth.convertToHtml({ buffer: buf });
+      // Convert HTML to text while preserving paragraph breaks
+      extracted = result.value
+        .replace(/<\/p>/g, '\n\n')  // Double newline for paragraph breaks
+        .replace(/<br\/>/g, '\n')    // Single newline for line breaks
+        .replace(/<[^>]+>/g, '')     // Remove all remaining HTML tags
+        .replace(/&nbsp;/g, ' ')     // Replace non-breaking spaces
+        .replace(/&amp;/g, '&')      // Decode entities
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#039;/g, "'")
+        .replace(/\n{3,}/g, '\n\n')  // Collapse 3+ newlines to 2
+        .trim();
     }
 
     // ── DOC (legacy): attempt mammoth, graceful fallback

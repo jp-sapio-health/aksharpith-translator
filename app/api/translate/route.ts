@@ -13,8 +13,8 @@ const SONNET = 'claude-sonnet-4-20250514';
 const HAIKU  = 'claude-haiku-4-5-20251001';
 const BATCH  = 5;                // parallel chunk concurrency
 const SEQ_CHUNKS = 1;            // translate first N chunks sequentially for memory
-const RECHECK_THRESHOLD = 93;   // re-review chunks scoring below this
-const MAX_REVIEW_ROUNDS = 2;    // max iterative review rounds per chunk
+const RECHECK_THRESHOLD = 96;   // re-review chunks scoring below this on weighted rubric score
+const MAX_REVIEW_ROUNDS = 3;    // max iterative review rounds per chunk (raised from 2 for stubborn chunks)
 const API_TIMEOUT_MS    = 120_000; // 120s per Claude call
 const MAX_RETRIES       = 2;      // retries for transient errors
 
@@ -102,6 +102,47 @@ function safeSlice(s: string, max: number): string {
   return cut > 0 ? s.slice(0, cut) : s.slice(0, max);
 }
 
+// ─── Deterministic Post-Processors ────────────────────────────────────────────
+
+/** Replace forbidden terminology with BAPS-mandated terms */
+function enforceTerminology(text: string): string {
+  let t = text;
+  // Whole-word replacements (case-insensitive)
+  t = t.replace(/\btemples\b/gi, (m: string) => m[0] === 'T' ? 'Mandirs' : 'mandirs');
+  t = t.replace(/\btemple\b/gi, (m: string) => m[0] === 'T' ? 'Mandir' : 'mandir');
+  t = t.replace(/\bpenance\b/gi, 'austerities');
+  t = t.replace(/\btorchbearer\b/gi, 'successor');
+  t = t.replace(/\baarti\b/gi, 'arti');
+  t = t.replace(/\bvicharan\b/gi, 'vichran');
+  // Phrase replacements
+  t = t.replace(/\bLord Swaminarayan\b/g, 'Bhagwan Swaminarayan');
+  t = t.replace(/\bdivine abode\b/gi, 'Akshardham');
+  t = t.replace(/\bShrijimaharaj\b/g, 'Shriji Maharaj');
+  return t;
+}
+
+/** Fix curly quotes, en dashes, and strip forbidden diacritics */
+function postProcess(text: string): string {
+  let t = text;
+  // Straight double quotes → curly (paired)
+  let openDouble = true;
+  t = t.replace(/"/g, () => { const q = openDouble ? '\u201c' : '\u201d'; openDouble = !openDouble; return q; });
+  // Straight single quotes → curly (only when clearly paired, not apostrophes)
+  t = t.replace(/'([^']{2,})'/g, '\u2018$1\u2019');
+  // Em dashes → spaced en dashes
+  t = t.replace(/\u2014/g, ' \u2013 ');
+  t = t.replace(/ {2,}\u2013 {2,}/g, ' \u2013 '); // clean double spaces
+  // Strip forbidden diacritics (keep only ā)
+  const diacriticMap: Record<string, string> = {
+    '\u1e41': 'm', '\u1e6d': 't', '\u1e63': 'sh', '\u015b': 'sh', '\u1e47': 'n',
+    '\u012b': 'i', '\u016b': 'u', '\u1e5b': 'r', '\u1e45': 'n', '\u1e0d': 'd', '\u0127': 'h', '\u00f1': 'n',
+  };
+  for (const [from, to] of Object.entries(diacriticMap)) {
+    t = t.split(from).join(to);
+  }
+  return t;
+}
+
 // ─── Gold Standard Context ────────────────────────────────────────────────────
 
 const HOUSE_RULES_CONTEXT = `
@@ -110,20 +151,24 @@ AKSHARPITH HOUSE-STYLE RULES (NON-NEGOTIABLE):
 1. LANGUAGE: British English, Oxford -ize spellings (organize, realize, colour, travelling, programme, fulfil).
 
 2. PUNCTUATION (HIGHEST PRIORITY):
-   - Curly double speech marks (\u201c \u201d) for ALL direct quotations and speech. NEVER straight quotes.
-   - Nested: \u201cSwamishri said, \u2018Prapti is 24 hours.\u2019\u201d
+   - Use curly double speech marks \u201c \u201d for ALL quotations, speech, verse transliterations, and book titles. NEVER use straight quotes (' or ").
+   - For nested quotes: \u201cSwamishri said, \u2018Prapti is 24 hours.\u2019\u201d
    - Spaced en dash ( \u2013 ) for parenthetical clauses. NEVER em dash.
    - Footnotes end with full stops if complete sentences.
+   - EXAMPLES: \u201cCambridge History of Gujarat\u201d NOT 'Cambridge History of Gujarat'. \u201cPreme pragaty\u0101 re suraj\u201d NOT 'Preme pragatya re suraj'.
 
-3. DIACRITICS (HIGHLY RESTRICTED):
-   - Use \u0101 ONLY when directly quoting poetic/canonical verses (e.g., \u201c\u0100tm\u0101 j\u0101go re\u2026\u201d)
-   - NEVER use macrons (\u012b, \u016b, \u1e5b, \u1e45, etc.) in prose.
-   - In prose: prapti, bhakti, anand, murti (no diacritics).
-   - BOUNDARY RULE: If a verse is quoted inline within a prose paragraph, diacritics apply ONLY within the quoted verse portion. The surrounding prose must remain diacritics-free.
+3. DIACRITICS (HIGHLY RESTRICTED — CRITICAL RULE):
+   - The ONLY diacritical mark permitted ANYWHERE is \u0101 (a with macron).
+   - \u0101 may ONLY appear when directly quoting poetic/canonical verses (e.g., \u201cPreme pragaty\u0101 re s\u016braj Sahaj\u0101nand\u201d)
+   - ABSOLUTELY NEVER use: \u1e41 (ṁ), \u1e6d (ṭ), \u1e63 (ṣ), \u015b (ś), \u1e47 (ṇ), \u012b (ī), \u016b (ū), \u1e5b (ṛ), \u1e45 (ṅ), \u1e0d (ḍ), \u0127 (ḥ), or ANY other diacritical mark.
+   - In verse transliteration: use PLAIN Roman letters for ALL consonants and vowels EXCEPT \u0101. Write "sh" not "\u015b", "n" not "\u1e47", "t" not "\u1e6d", "m" not "\u1e41".
+   - In prose: prapti, bhakti, anand, murti (absolutely no diacritics).
+   - BOUNDARY RULE: If a verse is quoted inline, diacritics (\u0101 only) apply ONLY within the quoted verse. Surrounding prose must be diacritics-free.
 
 4. MANDATORY TERMINOLOGY:
    - mandir (NEVER "temple")
-   - Swami / Swamis (NEVER "saint" / "sadhu")
+   - Swami / Swamis (NEVER "saint" / "sadhu" when referring to BAPS or genuine ascetics)
+   - bawa / bawas (for impostor ascetics, fraudulent religious figures, or pseudo-sadhus described negatively in the source)
    - devotee(s) (not "haribhakta")
    - Akshardham (NEVER "divine abode")
    - Shriji Maharaj (two words \u2014 NEVER "Shrijimaharaj")
@@ -145,9 +190,10 @@ AKSHARPITH HOUSE-STYLE RULES (NON-NEGOTIABLE):
    Chansad, Bamangam, Dhuliya, Dangara, Bhadrod, Piplana
 
 6. HISTORICAL INTEGRITY:
-   - Preserve exact dates, exact time stamps (e.g. 2.16 a.m.), all numbers.
+   - Preserve exact dates in BRITISH format: \u201c3 April 1781\u201d NOT "April 3, 1781".
+   - Preserve exact time stamps (e.g. 2.16 a.m.), all numbers.
    - Never approximate unless the source approximates.
-   - Historical names: use era-correct names (e.g., "Bombay Province" not "Mumbai").
+   - Historical names: use era-correct names (e.g., \u201cBombay Province\u201d not "Mumbai").
    - Never infer inner thoughts unless the source documents them.
 
 7. TONE: Dignified, measured, reverent, clear, intellectually honest.
@@ -163,10 +209,13 @@ AKSHARPITH HOUSE-STYLE RULES (NON-NEGOTIABLE):
    - Do NOT soften strong expressions.
    - Retain direct quotes in first person; never convert to indirect speech.
 
-9. POETRY & VERSE:
-   - Include Roman transliteration FIRST, then English meaning.
+9. POETRY & VERSE (CRITICAL):
+   - For EVERY verse block: provide Roman transliteration FIRST, then English meaning in parentheses. NEVER provide transliteration without its English meaning. Both are MANDATORY.
+   - In transliteration: use ONLY plain Roman letters plus \u0101. Example: "Preme pragaty\u0101 re suraj Sahaj\u0101nand" — NOT "Preme pragaty\u0101 re s\u016braj Sahaj\u0101nand".
+   - Wrap verse transliterations in curly double quotes (\u201c \u201d), same as all other quotations.
+   - Example format:
+     “Preme pragatyā re suraj Sahajānand, adharma andhāru tāliyu...” (“With love manifested the sun Sahajanand, dispelling the darkness of unrighteousness...”)
    - Retain original Gujarati/Sanskrit verse line intact.
-   - Use diacritics only within quoted verse.
    - Italicise transliterated verses.
 
 10. FORMATTING:
@@ -214,29 +263,73 @@ const PROTECTED_TERMS = 'mandir, seva, satsang, arti, vichran, mukhpath, katha, 
 // Splits at blank-line paragraph boundaries, targeting 300–500 words per chunk.
 // If the full text is ≤500 words, returns it as a single chunk.
 
+// Detect if a paragraph is a verse block (transliterated text, poetic structure, or quoted verse)
+function isVerseBlock(para: string): boolean {
+  const lines = para.split('\n').map(l => l.trim()).filter(Boolean);
+  if (lines.length < 2) return false;
+  // Quoted transliterated text (lines starting with quotes containing transliterated words)
+  const quotedVerse = lines.some(l => /^[\u201c\u201d"'\u2018\u2019]/.test(l) && /[āīūṛṅñṭḍṇśṣḥ]/.test(l));
+  // Poetic structure: multiple short lines of similar length (verse stanzas)
+  const avgLen = lines.reduce((s, l) => s + l.length, 0) / lines.length;
+  const similarLength = lines.length >= 2 && lines.every(l => Math.abs(l.length - avgLen) < avgLen * 0.5);
+  // Lines containing diacritical marks typical of transliteration
+  const diacriticLines = lines.filter(l => /[āīūṛṅñṭḍṇśṣḥ]/.test(l)).length;
+  const mostlyDiacritic = diacriticLines >= lines.length * 0.5;
+  return quotedVerse || (similarLength && mostlyDiacritic);
+}
+
 function deterministicChunk(text: string): string[] {
   const trimmed = text.trim();
   if (!trimmed) return [];
   const totalWords = trimmed.split(/\s+/).filter(Boolean).length;
   if (totalWords <= 500) return [trimmed];
 
-  const paragraphs = trimmed.split(/\n\s*\n/);
+  // Try double-newline split first; if any paragraph > 500 words, fall back to single-newline
+  let rawParagraphs = trimmed.split(/\n\s*\n/);
+  const hasGiantPara = rawParagraphs.some(p => p.trim().split(/\s+/).length > 500);
+  if (hasGiantPara) {
+    rawParagraphs = trimmed.split(/\n/).filter(l => l.trim());
+  }
+  const paragraphs = rawParagraphs;
+
+  // Group verse blocks with their preceding paragraph to keep them together
+  const groups: string[] = [];
+  let pendingVerse: string | null = null;
+  for (const para of paragraphs) {
+    const p = para.trim();
+    if (!p) continue;
+    if (isVerseBlock(p)) {
+      // Attach verse to previous group if one exists, otherwise hold it
+      if (groups.length > 0) {
+        groups[groups.length - 1] += '\n\n' + p;
+      } else {
+        pendingVerse = pendingVerse ? pendingVerse + '\n\n' + p : p;
+      }
+    } else {
+      if (pendingVerse) {
+        groups.push(pendingVerse + '\n\n' + p);
+        pendingVerse = null;
+      } else {
+        groups.push(p);
+      }
+    }
+  }
+  if (pendingVerse) groups.push(pendingVerse);
+
   const chunks: string[] = [];
   let current: string[] = [];
   let currentWords = 0;
 
-  for (const para of paragraphs) {
-    const p = para.trim();
-    if (!p) continue;
-    const paraWords = p.split(/\s+/).length;
+  for (const group of groups) {
+    const groupWords = group.split(/\s+/).length;
 
-    if (currentWords + paraWords > 500 && currentWords >= 300) {
+    if (currentWords + groupWords > 500 && currentWords >= 300) {
       chunks.push(current.join('\n\n'));
-      current = [p];
-      currentWords = paraWords;
+      current = [group];
+      currentWords = groupWords;
     } else {
-      current.push(p);
-      currentWords += paraWords;
+      current.push(group);
+      currentWords += groupWords;
     }
   }
 
@@ -267,30 +360,38 @@ MINDSET: Every sentence carries devotional, historical, and doctrinal weight. Pr
 
 const REVIEWER_SYSTEM = `You are a BAPS translation auditor and senior style reviewer for Aksharpith. You are reviewing text produced by ANOTHER translator \u2014 you did NOT write this text. Perform a combined certification and style audit in a single pass.
 
-IMPORTANT: You are an INDEPENDENT auditor. Score objectively against the checklist. Do not inflate scores. If you produce a revised translation, you are correcting the original translator's work, not your own.
+IMPORTANT: You are an INDEPENDENT auditor. Score objectively against the weighted rubric below. Do not inflate scores. If you produce a revised translation, you are correcting the original translator's work, not your own.
 
-PART 1 \u2014 BAPS CERTIFICATION CHECKLIST (8 categories):
+WEIGHTED SCORING RUBRIC (6 categories, 100 points total):
 
-A. TERMINOLOGY \u2014 Verify mandatory terms:
-   mandir (NEVER "temple") | Swami/Swamis (NEVER "saint/saints/sadhu")
-   Akshardham (NEVER "divine abode") | Shriji Maharaj (two words \u2014 NEVER "Shrijimaharaj")
-   Bhagwan Swaminarayan (NEVER "Lord Swaminarayan") | Swamishri (after first reference)
-   austerities (NEVER "penance") | devotees (NEVER "haribhaktas")
-   seva/satsang/arti/vichran/mukhpath (exact spellings) | successor (NEVER "torchbearer")
+1. FIDELITY (30 pts) \u2014 Nothing added/omitted/paraphrased. Every Gujarati sentence must map to an English sentence. Direct quotes stay first-person. Numbers, dates, names preserved exactly. No commentary. No interpretation.
 
-B. PUNCTUATION \u2014 Curly quotes \u201c \u201d (NEVER straight) | Spaced en dash ( \u2013 ) NEVER em dash
+2. TERMINOLOGY (25 pts) \u2014 Verify mandatory terms:
+   mandir (NEVER "temple") | Swami/Swamis (NEVER "saint/saints/sadhu" for BAPS ascetics)
+   bawa (for impostor ascetics) | austerities (NEVER "penance")
+   Shriji Maharaj (two words \u2014 NEVER "Shrijimaharaj")
+   Bhagwan Swaminarayan (NEVER "Lord Swaminarayan")
+   Akshardham (NEVER "divine abode") | paramhansa
+   devotees (NEVER "haribhaktas") | arti (NEVER "aarti") | vichran (NEVER "vicharan")
+   satsang | seva | santmandal | brahmisthiti
+   successor (NEVER "torchbearer") | Swamishri (after first reference)
 
-C. DIACRITICS \u2014 NO macrons in prose. Only inside quoted verse. If a verse is quoted inline within prose, diacritics apply ONLY within the quoted verse portion.
+3. VERSE HANDLING (15 pts) \u2014 Roman transliteration FIRST, then English meaning. Full reproduction, no truncation. ONLY the diacritical mark \u0101 is permitted in verse transliteration \u2014 NEVER use \u1e41/\u1e6d/\u1e63/\u015b/\u1e47/\u012b/\u016b/\u1e5b/\u1e45/\u1e0d or any other special character. Write plain Roman: "sh" not "\u015b", "n" not "\u1e47", "t" not "\u1e6d". Consistent verse formatting throughout. Verse lines must use curly quotes (\u201c \u201d).
 
-D. TONE \u2014 British English, Oxford -ize (organize, realize, colour, travelling, programme, fulfil). No American marketing. No "mythology" for sacred texts. Dignified, measured, reverent register.
+4. STYLE & REGISTER (15 pts) \u2014 UK English Oxford -ize (organize, realize, colour, travelling, programme, fulfil). Curly quotes \u201c \u201d (NEVER straight). Spaced en dash ( \u2013 ) NEVER em dash. Dignified, reverent, scholarly tone. No "mythology" for sacred texts. No American marketing tone. No modern management terms.
 
-E. FIDELITY \u2014 Nothing added/omitted. Direct speech stays first-person. No commentary. No paraphrasing.
+5. HISTORICAL PRECISION (10 pts) \u2014 Era-correct names (e.g. "Bombay Province" not "Mumbai"). Exact dates/timestamps. Exact place spellings: Chhapaiya, Kathiawad, Chansad, Bamangam, Dhuliya, Dangara, Bhadrod. Correct attribution of historical quotes.
 
-F. VERSE \u2014 Transliteration FIRST, then English meaning. Full reproduction, no truncation.
+6. COMPLETENESS (5 pts) \u2014 All paragraphs translated. No summarisation. No truncation. Every verse reproduced in full.
 
-G. HISTORICAL \u2014 Exact dates/times. Place names: Chansad, Bamangam, Dhuliya, Dangara, Bhadrod. Era-correct names (e.g. "Bombay Province" not "Mumbai").
+DEDUCTION RULES (per category):
+- Critical violation: \u221260% of that category's weight
+- Major violation: \u221240% of that category's weight
+- Minor violation: \u221220% of that category's weight
+- Each category score cannot go below 0
 
-H. COMPLETENESS \u2014 All paragraphs translated, no truncation.
+Total = sum of all 6 category scores (max 100).
+Set "certifiable" to true ONLY if total >= 97 AND zero critical violations across all categories.
 
 COMMON PITFALLS (check each):
 1. saints\u2192Swamis 2. temple\u2192mandir 3. Lord Swaminarayan\u2192Bhagwan Swaminarayan
@@ -299,24 +400,42 @@ COMMON PITFALLS (check each):
 10. straight quotes 11. em dash 12. macrons in prose 13. missing transliteration
 14. mythology 15. aarti\u2192arti 16. vicharan\u2192vichran 17. torchbearer\u2192successor
 18. place name misspellings 19. American spellings 20. satsang\u2192fellowship
+21. forbidden diacritics (\u1e41 \u1e6d \u1e63 \u015b \u1e47 \u012b \u016b \u1e5b \u1e0d) in verse\u2192replace with plain Roman + \u0101 only
+22. straight quotes on verse lines\u2192curly quotes
+23. "sadhu/sadhus" for impostors\u2192"bawa/bawas"
 
-PART 2 \u2014 STYLE AND REGISTER:
-
-1. REGISTER: Flag casual, promotional, or American-register phrasing.
-2. PROSE QUALITY: Flag awkward calques from Gujarati syntax, overly literal phrasing, or unnatural English.
-3. CONSISTENCY: Flag inconsistent term renderings across the passage.
-4. FLOW: Flag abrupt jumps or choppy prose.
-
-SCORING: Start at 100. Deduct per issue:
-- Minor (spelling, punctuation): 3\u20135 pts
-- Major (wrong term, register violation, consistency): 8\u201312 pts
-- Critical (fidelity error, omission, added commentary): 15\u201320 pts
-Set "certifiable" to true only if ALL 8 categories pass AND zero pitfalls found.
-
-Produce a corrected revised translation fixing ALL certification and style issues.
+Produce a corrected revised translation fixing ALL issues found.
 
 Return ONLY valid JSON (no fences):
-{"categories": [{"id": "A", "name": "Terminology", "pass": true, "issues": []}, ...], "pitfalls": [], "issues": [], "score": <0-100>, "revised": "...", "certifiable": false}`;
+{"categories": [{"id": "FIDELITY", "weight": 30, "score": 28, "deductions": ["Minor: ..."], "pass": true}, {"id": "TERMINOLOGY", "weight": 25, "score": 25, "deductions": [], "pass": true}, {"id": "VERSE_HANDLING", "weight": 15, "score": 15, "deductions": [], "pass": true}, {"id": "STYLE_REGISTER", "weight": 15, "score": 15, "deductions": [], "pass": true}, {"id": "HISTORICAL_PRECISION", "weight": 10, "score": 10, "deductions": [], "pass": true}, {"id": "COMPLETENESS", "weight": 5, "score": 5, "deductions": [], "pass": true}], "totalScore": 98, "certifiable": true, "revised": "..."}`;
+
+const STYLE_REVIEWER_SYSTEM = `You are a senior style and register reviewer for Aksharpith. The text you receive has already passed BAPS certification (terminology, punctuation, diacritics, fidelity). Your job is ONLY to review style, register, and prose quality.
+
+REVIEW CRITERIA:
+
+1. REGISTER: Flag casual, promotional, or American-register phrasing. Ensure British English, Oxford -ize throughout.
+2. PROSE QUALITY: Flag awkward calques from Gujarati syntax, overly literal phrasing, or unnatural English.
+3. CONSISTENCY: Flag inconsistent term renderings across the passage (same Gujarati word translated differently).
+4. FLOW: Flag abrupt jumps, choppy prose, or poor transitions between ideas.
+5. SENTENCE STRUCTURE: Flag overly long sentences (>40 words) that could be split for clarity without changing meaning.
+
+NEVER CHANGE:
+- Any BAPS terminology or proper nouns
+- Direct quotes from any named figure
+- Transliterated verses and their translations
+- Dates, numbers, time stamps
+- Curly quotes, spaced en dashes, and all punctuation formatting
+- These terms: ${PROTECTED_TERMS}
+
+SCORING: Start at 100. Deduct per issue:
+- Minor (awkward phrasing, repetitive openers): 2-4 pts
+- Moderate (register inconsistency, poor flow): 5-8 pts
+- Major (American English, casual tone, calque): 8-12 pts
+
+Produce a revised translation fixing ALL style issues while preserving meaning exactly.
+
+Return ONLY valid JSON (no fences):
+{"style_issues": ["issue1", ...], "style_score": <0-100>, "revised": "..."}`;
 
 const SMOOTHER_SYSTEM = `You are a senior editorial reader for Aksharpith performing a final readability pass. The text you receive has already been certified by a BAPS auditor \u2014 all terminology, punctuation, and diacritics are correct. Your job is ONLY to improve prose flow.
 
@@ -336,6 +455,8 @@ NEVER CHANGE:
 - Any phrasing that appears deliberately structured for doctrinal precision, even if slightly awkward in English
 
 If the input is entirely verse/poetry with no narrative prose, return it unchanged.
+
+CRITICAL RULE: If in doubt about whether a change preserves meaning, DO NOT make the change. Err on the side of preserving the certified text. Minimal, targeted improvements only.
 
 STYLE: En dash ( \u2013 ) throughout | British English, Oxford -ize | Curly quotes | Reverent tone
 
@@ -377,10 +498,10 @@ async function translatorAgent(
 }
 
 interface ReviewResult {
-  categories: Array<{ id: string; name: string; pass: boolean; issues: string[] }>;
+  categories: Array<{ id: string; weight: number; score: number; deductions: string[]; pass: boolean }>;
   pitfalls: string[];
   issues: string[];
-  score: number;
+  score: number;       // mapped from totalScore for downstream compatibility
   revised: string;
   certifiable: boolean;
 }
@@ -399,8 +520,11 @@ async function reviewerAgent(apiKey: string, original: string, translation: stri
     return fallback;
   }
 
+  // Strip markdown code fences that LLMs often wrap JSON in
+  const stripped = raw.replace(/^```(?:json)?\s*/gm, '').replace(/\s*```$/gm, '');
+
   // Try to extract JSON object from the response
-  const match = raw.match(/\{[\s\S]*\}/);
+  const match = stripped.match(/\{[\s\S]*\}/);
   if (!match) {
     console.error('Reviewer returned no JSON object. Raw response (first 500 chars):', raw.slice(0, 500));
     return fallback;
@@ -411,11 +535,23 @@ async function reviewerAgent(apiKey: string, original: string, translation: stri
   // Attempt standard parse first
   try {
     const p = JSON.parse(jsonStr);
+    // Map totalScore (weighted rubric) to score for downstream compatibility; fall back to legacy p.score
+    const rawScore = typeof p.totalScore === 'number' ? p.totalScore : (typeof p.score === 'number' ? p.score : 50);
+    // Normalise categories to new weighted format
+    const cats: ReviewResult['categories'] = Array.isArray(p.categories)
+      ? p.categories.map((c: Record<string, unknown>) => ({
+          id:         typeof c.id === 'string' ? c.id : '',
+          weight:     typeof c.weight === 'number' ? c.weight : 0,
+          score:      typeof c.score === 'number' ? Math.max(0, c.score as number) : 0,
+          deductions: Array.isArray(c.deductions) ? (c.deductions as unknown[]).filter((s: unknown) => typeof s === 'string') as string[] : (Array.isArray(c.issues) ? (c.issues as unknown[]).filter((s: unknown) => typeof s === 'string') as string[] : []),
+          pass:       typeof c.pass === 'boolean' ? c.pass : true,
+        }))
+      : [];
     return {
-      categories:  Array.isArray(p.categories) ? p.categories : [],
+      categories:  cats,
       pitfalls:    Array.isArray(p.pitfalls) ? p.pitfalls.filter((s: unknown) => typeof s === 'string') : [],
       issues:      Array.isArray(p.issues) ? p.issues.filter((s: unknown) => typeof s === 'string') : [],
-      score:       typeof p.score === 'number' ? Math.max(0, Math.min(100, p.score)) : 50,
+      score:       Math.max(0, Math.min(100, rawScore)),
       revised:     typeof p.revised === 'string' && p.revised.trim() ? p.revised.trim() : translation,
       certifiable: typeof p.certifiable === 'boolean' ? p.certifiable : false,
     };
@@ -423,11 +559,16 @@ async function reviewerAgent(apiKey: string, original: string, translation: stri
     // JSON parse failed — likely truncated response. Try to salvage what we can.
     console.error('Reviewer JSON parse failed (likely truncated). Attempting partial extraction. Raw length:', raw.length, 'First 300 chars:', raw.slice(0, 300));
 
-    // Try to extract score
+    // Try to extract totalScore first (weighted rubric), fall back to score
     let score = 50;
-    const scoreMatch = jsonStr.match(/"score"\s*:\s*(\d+)/);
-    if (scoreMatch) {
-      score = Math.max(0, Math.min(100, parseInt(scoreMatch[1], 10)));
+    const totalScoreMatch = jsonStr.match(/"totalScore"\s*:\s*(\d+)/);
+    if (totalScoreMatch) {
+      score = Math.max(0, Math.min(100, parseInt(totalScoreMatch[1], 10)));
+    } else {
+      const scoreMatch = jsonStr.match(/"score"\s*:\s*(\d+)/);
+      if (scoreMatch) {
+        score = Math.max(0, Math.min(100, parseInt(scoreMatch[1], 10)));
+      }
     }
 
     // Try to extract revised text (may be truncated)
@@ -482,22 +623,131 @@ async function reviewerAgent(apiKey: string, original: string, translation: stri
   }
 }
 
-async function smootherAgent(apiKey: string, text: string): Promise<string> {
-  return callClaude({
+interface StyleReviewResult {
+  style_issues: string[];
+  style_score: number;
+  revised: string;
+}
+
+async function styleReviewerAgent(apiKey: string, text: string): Promise<StyleReviewResult> {
+  const fallback: StyleReviewResult = { style_issues: [], style_score: 90, revised: text };
+  let raw: string;
+  try {
+    raw = await callClaude({
+      model: SONNET, max_tokens: 16000, apiKey,
+      system: STYLE_REVIEWER_SYSTEM,
+      messages: [{ role: 'user', content: `Review the style and register of this certified translation. Return ONLY valid JSON.\n\nTRANSLATION:\n${text}` }],
+    });
+  } catch (err) {
+    console.error('Style reviewer API call failed:', err instanceof Error ? err.message : err);
+    return fallback;
+  }
+
+  const match = raw.match(/\{[\s\S]*\}/);
+  if (!match) {
+    console.error('Style reviewer returned no JSON object. Raw (first 500 chars):', raw.slice(0, 500));
+    return fallback;
+  }
+
+  try {
+    const p = JSON.parse(match[0]);
+    return {
+      style_issues: Array.isArray(p.style_issues) ? p.style_issues.filter((s: unknown) => typeof s === 'string') : [],
+      style_score:  typeof p.style_score === 'number' ? Math.max(0, Math.min(100, p.style_score)) : 90,
+      revised:      typeof p.revised === 'string' && p.revised.trim() ? p.revised.trim() : text,
+    };
+  } catch {
+    console.error('Style reviewer JSON parse failed. Using fallback.');
+    return fallback;
+  }
+}
+
+// Character-level diff ratio: proportion of characters that differ between two strings
+function charDiffRatio(a: string, b: string): number {
+  const maxLen = Math.max(a.length, b.length);
+  if (maxLen === 0) return 0;
+  let diffs = Math.abs(a.length - b.length);
+  const minLen = Math.min(a.length, b.length);
+  for (let i = 0; i < minLen; i++) {
+    if (a[i] !== b[i]) diffs++;
+  }
+  return diffs / maxLen;
+}
+
+async function smootherAgent(apiKey: string, text: string): Promise<{ text: string; flagged: boolean }> {
+  const smoothed = await callClaude({
     model: SONNET, max_tokens: 8192, apiKey,
     system: SMOOTHER_SYSTEM,
     messages: [{ role: 'user', content: `Perform the readability pass. Return ONLY the revised text.\n\n${text}` }],
   });
+  const diffRatio = charDiffRatio(text, smoothed);
+  if (diffRatio > 0.15) {
+    console.warn(`Smoother changed ${(diffRatio * 100).toFixed(1)}% of characters (>15% threshold). Flagging for review and using original.`);
+    return { text, flagged: true };
+  }
+  return { text: smoothed, flagged: false };
 }
 
 async function assemblerAgent(apiKey: string, smoothedChunks: string[]): Promise<string> {
   const combined = smoothedChunks.join('\n\n');
   if (smoothedChunks.length === 1) return combined;
   return callClaude({
-    model: SONNET, max_tokens: 32000, apiKey,
+    model: SONNET, max_tokens: 64000, apiKey,
     system: ASSEMBLER_SYSTEM,
     messages: [{ role: 'user', content: `Assemble these chunks into a single document:\n\n${combined}` }],
   });
+}
+
+// Cross-chunk consistency checker — ensures same terms rendered identically across all chunks
+interface ConsistencyResult {
+  inconsistencies: Array<{ term: string; variants: string[]; recommended: string }>;
+  corrections: Map<number, string>; // chunk index -> corrected text
+}
+
+async function crossChunkConsistencyCheck(apiKey: string, chunks: string[]): Promise<ConsistencyResult> {
+  if (chunks.length <= 1) return { inconsistencies: [], corrections: new Map() };
+
+  // Send all chunks to Haiku to detect inconsistencies
+  const numberedChunks = chunks.map((c, i) => `--- CHUNK ${i + 1} ---\n${c}`).join('\n\n');
+  const raw = await callClaude({
+    model: HAIKU, max_tokens: 4096, apiKey,
+    system: `You are a consistency checker for translated text. Examine all chunks and identify:
+1. Same proper nouns rendered differently across chunks (e.g., "avatari Purush" vs "avataric Purush")
+2. Same theological/technical terms translated inconsistently
+3. Same Gujarati phrases given different English translations
+
+For each inconsistency, recommend the BEST rendering based on BAPS conventions.
+
+Then produce corrected versions of ONLY the chunks that need changes. Keep corrections minimal — change only the inconsistent terms.
+
+Return ONLY valid JSON (no fences):
+{"inconsistencies": [{"term": "original", "variants": ["var1", "var2"], "recommended": "best"}], "corrected_chunks": {"1": "full corrected text of chunk 1", ...}}
+
+If no inconsistencies found, return: {"inconsistencies": [], "corrected_chunks": {}}`,
+    messages: [{ role: 'user', content: `Check these ${chunks.length} translated chunks for terminology consistency:\n\n${numberedChunks}` }],
+  });
+
+  const fallback: ConsistencyResult = { inconsistencies: [], corrections: new Map() };
+  const match = raw.match(/\{[\s\S]*\}/);
+  if (!match) return fallback;
+
+  try {
+    const p = JSON.parse(match[0]);
+    const inconsistencies = Array.isArray(p.inconsistencies) ? p.inconsistencies : [];
+    const corrections = new Map<number, string>();
+    if (p.corrected_chunks && typeof p.corrected_chunks === 'object') {
+      for (const [key, value] of Object.entries(p.corrected_chunks)) {
+        const idx = parseInt(key, 10) - 1; // Convert 1-based to 0-based
+        if (!isNaN(idx) && typeof value === 'string' && value.trim()) {
+          corrections.set(idx, value as string);
+        }
+      }
+    }
+    return { inconsistencies, corrections };
+  } catch {
+    console.error('Consistency check JSON parse failed.');
+    return fallback;
+  }
 }
 
 async function extractTranslationMemory(apiKey: string, gujarati: string, english: string): Promise<string> {
@@ -576,13 +826,17 @@ export async function POST(req: NextRequest) {
         // Stage completion tracking
         let translateDone = 0, reviewDone = 0, smoothDone = 0;
         let translatorStarted = false, reviewerStarted = false, smootherStarted = false;
+        let styleReviewerStarted = false, styleReviewerFinished = false;
         let translatorFinished = false, reviewerFinished = false, smootherFinished = false;
         let totalRechecks = 0;
+        let smootherFlagged = 0;
+        const styleReviews: StyleReviewResult[] = new Array(chunks.length);
+        let styleReviewDone = 0;
 
         async function processChunk(i: number) {
           // ── Translate ──
           if (!translatorStarted) { translatorStarted = true; send({ stage: 'translator', status: 'running' }); }
-          translations[i] = await translatorAgent(apiKey, chunks[i], translationMemory, i, chunks.length);
+          translations[i] = enforceTerminology(await translatorAgent(apiKey, chunks[i], translationMemory, i, chunks.length));
           translateDone++;
           send({ stage: 'translator', status: 'progress', current: translateDone, total: chunks.length, index: i, translation: translations[i] });
           if (translateDone === chunks.length && !translatorFinished) {
@@ -590,7 +844,17 @@ export async function POST(req: NextRequest) {
             send({ stage: 'translator', status: 'done', memorySize: translationMemory.length });
           }
 
-          // ── Review ──
+          // ── Extract translation memory from EVERY chunk (Change 5) ──
+          if (chunks.length > 1) {
+            try {
+              const mem = await extractTranslationMemory(apiKey, chunks[i], translations[i]);
+              if (mem) {
+                translationMemory = (translationMemory + '\n' + mem).trim().slice(-2000);
+              }
+            } catch { /* ignore memory extraction failure */ }
+          }
+
+          // ── Certification Review (Pass 1 — Opus) ──
           if (!reviewerStarted) { reviewerStarted = true; send({ stage: 'reviewer', status: 'running' }); }
           reviews[i] = await reviewerAgent(apiKey, chunks[i], translations[i]);
           send({ stage: 'reviewer', status: 'progress', completed: reviewDone + 1, total: chunks.length, index: i, categories: reviews[i].categories, pitfalls: reviews[i].pitfalls, issues: reviews[i].issues, score: reviews[i].score, certifiable: reviews[i].certifiable });
@@ -611,27 +875,32 @@ export async function POST(req: NextRequest) {
             send({ stage: 'reviewer', status: 'done', certCount, total: chunks.length, avgScore, rechecked: totalRechecks });
           }
 
-          // ── Smooth (always run on every chunk) ──
+          // ── Style Review (Pass 2 — Sonnet) ──
+          if (!styleReviewerStarted) { styleReviewerStarted = true; send({ stage: 'style-reviewer', status: 'running' }); }
+          styleReviews[i] = await styleReviewerAgent(apiKey, reviews[i].revised);
+          styleReviewDone++;
+          send({ stage: 'style-reviewer', status: 'progress', completed: styleReviewDone, total: chunks.length, index: i, style_score: styleReviews[i].style_score, style_issues: styleReviews[i].style_issues });
+          if (styleReviewDone === chunks.length && !styleReviewerFinished) {
+            styleReviewerFinished = true;
+            const avgStyleScore = chunks.length > 0 ? styleReviews.reduce((s, r) => s + r.style_score, 0) / chunks.length : 0;
+            send({ stage: 'style-reviewer', status: 'done', avgStyleScore: Math.round(avgStyleScore) });
+          }
+
+          // ── Smooth (always run on every chunk, with diff-check) ──
           if (!smootherStarted) { smootherStarted = true; send({ stage: 'smoother', status: 'running' }); }
-          smoothedChunks[i] = await smootherAgent(apiKey, reviews[i].revised);
+          const smoothResult = await smootherAgent(apiKey, styleReviews[i].revised);
+          smoothedChunks[i] = postProcess(enforceTerminology(smoothResult.text));
+          if (smoothResult.flagged) smootherFlagged++;
           smoothDone++;
-          send({ stage: 'smoother', status: 'progress', completed: smoothDone, total: chunks.length, index: i });
+          send({ stage: 'smoother', status: 'progress', completed: smoothDone, total: chunks.length, index: i, flagged: smoothResult.flagged });
           if (smoothDone === chunks.length && !smootherFinished) {
             smootherFinished = true;
-            send({ stage: 'smoother', status: 'done' });
+            send({ stage: 'smoother', status: 'done', flaggedChunks: smootherFlagged });
           }
         }
 
-        // Process chunk 0 sequentially for translation memory
+        // Process chunk 0 sequentially for translation memory seeding
         await processChunk(0);
-
-        // Extract translation memory from first chunk
-        if (chunks.length > 1) {
-          try {
-            const mem = await extractTranslationMemory(apiKey, chunks[0], translations[0]);
-            if (mem) translationMemory = mem.slice(-2000);
-          } catch { /* ignore memory extraction failure */ }
-        }
 
         // Process remaining chunks in parallel through the full pipeline
         if (chunks.length > 1) {
@@ -647,15 +916,39 @@ export async function POST(req: NextRequest) {
           const avgScore = chunks.length > 0 ? reviews.reduce((s, r) => s + r.score, 0) / chunks.length : 0;
           send({ stage: 'reviewer', status: 'done', certCount, total: chunks.length, avgScore, rechecked: totalRechecks });
         }
+        if (!styleReviewerFinished) {
+          styleReviewerFinished = true;
+          const avgStyleScore = chunks.length > 0 ? styleReviews.reduce((s, r) => s + r.style_score, 0) / chunks.length : 0;
+          send({ stage: 'style-reviewer', status: 'done', avgStyleScore: Math.round(avgStyleScore) });
+        }
         if (!smootherFinished) {
           smootherFinished = true;
-          send({ stage: 'smoother', status: 'done' });
+          send({ stage: 'smoother', status: 'done', flaggedChunks: smootherFlagged });
+        }
+
+        // ── Cross-chunk consistency check (Change 4) ──────────────────────
+        if (chunks.length > 1) {
+          send({ stage: 'consistency', status: 'running' });
+          try {
+            const consistency = await crossChunkConsistencyCheck(apiKey, smoothedChunks);
+            if (consistency.inconsistencies.length > 0) {
+              send({ stage: 'consistency', status: 'progress', inconsistencies: consistency.inconsistencies });
+              // Apply corrections to affected chunks
+              consistency.corrections.forEach((corrected, idx) => {
+                smoothedChunks[idx] = corrected;
+              });
+            }
+            send({ stage: 'consistency', status: 'done', issuesFound: consistency.inconsistencies.length, chunksFixed: consistency.corrections.size });
+          } catch (err) {
+            console.error('Consistency check failed:', err instanceof Error ? err.message : err);
+            send({ stage: 'consistency', status: 'done', issuesFound: 0, chunksFixed: 0, warning: 'Consistency check failed, proceeding without it' });
+          }
         }
 
         // ── Stage 5: Assembler (Sonnet) ─────────────────────────────────
         const avgScore = chunks.length > 0 ? reviews.reduce((s, r) => s + r.score, 0) / chunks.length : 0;
         send({ stage: 'assembler', status: 'running' });
-        const assembled = await assemblerAgent(apiKey, smoothedChunks);
+        const assembled = postProcess(await assemblerAgent(apiKey, smoothedChunks));
         const finalWords = assembled.trim().split(/\s+/).filter(Boolean).length;
         send({ stage: 'assembler', status: 'done', output: assembled, wordCount: finalWords, avgScore: Math.round(avgScore) });
 

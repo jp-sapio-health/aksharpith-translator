@@ -177,16 +177,47 @@ const PROTECTED_TERMS = 'mandir, seva, satsang, arti, vichran, mukhpath, katha, 
 
 // ─── System Prompts (Bond-audited) ──────────────────────────────────────────
 
-const CHUNKER_SYSTEM = `You are a structural analyst for Gujarati sacred texts. Split the input into chunks for translation.
+// ─── Deterministic chunker ─────────────────────────────────────────────────
+// Splits at blank-line paragraph boundaries, targeting 300–500 words per chunk.
+// If the full text is ≤500 words, returns it as a single chunk.
 
-RULES:
-- Target 300\u2013500 words per chunk. If the entire input is under 500 words, return it as a single chunk.
-- Split ONLY at blank-line paragraph boundaries or verse boundaries. Never break mid-sentence, mid-verse, or mid-quotation.
-- If a chapter heading is present, always start a new chunk at the heading. Keep a heading attached to the paragraph(s) that follow it.
-- If no natural break point exists within 500 words, allow the chunk to exceed 500 rather than breaking mid-sentence.
+function deterministicChunk(text: string): string[] {
+  const totalWords = text.trim().split(/\s+/).length;
+  if (totalWords <= 500) return [text.trim()];
 
-Return ONLY valid JSON matching this schema (no markdown fences):
-{"chunks": ["chunk1 text", "chunk2 text", ...]}`;
+  const paragraphs = text.split(/\n\s*\n/);
+  const chunks: string[] = [];
+  let current: string[] = [];
+  let currentWords = 0;
+
+  for (const para of paragraphs) {
+    const trimmed = para.trim();
+    if (!trimmed) continue;
+    const paraWords = trimmed.split(/\s+/).length;
+
+    // If adding this paragraph would exceed 500 words and we already have ≥300
+    if (currentWords + paraWords > 500 && currentWords >= 300) {
+      chunks.push(current.join('\n\n'));
+      current = [trimmed];
+      currentWords = paraWords;
+    } else {
+      current.push(trimmed);
+      currentWords += paraWords;
+    }
+  }
+
+  // Flush remaining
+  if (current.length > 0) {
+    // If the last chunk is too small (<150 words) and there's a previous chunk, merge it
+    if (currentWords < 150 && chunks.length > 0) {
+      chunks[chunks.length - 1] += '\n\n' + current.join('\n\n');
+    } else {
+      chunks.push(current.join('\n\n'));
+    }
+  }
+
+  return chunks.length > 0 ? chunks : [text.trim()];
+}
 
 const TRANSLATOR_SYSTEM = `You are a trustee of tradition (parampara) for Aksharpith, the publishing wing of BAPS Swaminarayan Sanstha. Your priority is FIDELITY OVER FLUENCY. You are a carrier of the original voice \u2014 not a commentator, not an editor.
 
@@ -294,19 +325,8 @@ Output ONLY the final document \u2014 no preamble or notes.`;
 
 // ─── Agent functions ────────────────────────────────────────────────────────
 
-async function chunkerAgent(apiKey: string, text: string): Promise<string[]> {
-  const raw = await callClaude({
-    model: HAIKU, max_tokens: 4096, apiKey,
-    system: CHUNKER_SYSTEM,
-    messages: [{ role: 'user', content: `Split this Gujarati text into chunks. Return JSON: {"chunks": [...]}\n\nTEXT:\n${text}` }],
-  });
-  const match = raw.match(/\{[\s\S]*\}/);
-  if (!match) return [text];
-  try {
-    const p = JSON.parse(match[0]);
-    const chunks = Array.isArray(p.chunks) ? p.chunks.filter((c: unknown) => typeof c === 'string' && (c as string).trim()) : [];
-    return chunks.length > 0 ? chunks : [text];
-  } catch { return [text]; }
+function chunkerAgent(_apiKey: string, text: string): Promise<string[]> {
+  return Promise.resolve(deterministicChunk(text));
 }
 
 async function translatorAgent(

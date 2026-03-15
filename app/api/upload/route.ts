@@ -1,6 +1,7 @@
 import https from 'node:https';
 import mammoth from 'mammoth';
 import { NextRequest } from 'next/server';
+import { verifyAuthToken } from '../../../lib/verify-auth';
 
 export const dynamic    = 'force-dynamic';
 export const maxDuration = 300;
@@ -154,6 +155,9 @@ function splitByWordCount(lines: string[], targetWords: number): Array<{ title: 
 
 export async function POST(req: NextRequest) {
   try {
+    const authUser = await verifyAuthToken(req);
+    if (!authUser) return Response.json({ error: 'Unauthorized' }, { status: 401 });
+
     const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
     if (!apiKey) return Response.json({ error: 'ANTHROPIC_API_KEY not set' }, { status: 500 });
 

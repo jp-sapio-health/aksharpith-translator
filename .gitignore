@@ -1,5 +1,6 @@
 .env.local
 .env*.local
+*Service Account*.json
 node_modules/
 .next/
 out/

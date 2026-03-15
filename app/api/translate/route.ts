@@ -1,5 +1,7 @@
 import https from 'node:https';
 import { NextRequest } from 'next/server';
+import { verifyAuthToken } from '../../../lib/verify-auth';
+import { adminDb } from '../../../lib/firebase-admin';
 
 export const dynamic    = 'force-dynamic';
 export const maxDuration = 300;
@@ -429,8 +431,16 @@ async function extractTranslationMemory(apiKey: string, gujarati: string, englis
 // ─── Route handler ─────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
+  const authUser = await verifyAuthToken(req);
+  if (!authUser) {
+    return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 });
+  }
+
   const body = await req.json().catch(() => ({}));
-  const { text, chapterTitle } = body as { text?: string; chapterTitle?: string };
+  const { text, chapterTitle, bookId, chapterIndex, totalChapters, bookTitle } = body as {
+    text?: string; chapterTitle?: string;
+    bookId?: string; chapterIndex?: number; totalChapters?: number; bookTitle?: string;
+  };
 
   if (!text?.trim()) {
     return new Response(JSON.stringify({ error: 'No text provided' }), { status: 400 });
@@ -535,6 +545,23 @@ export async function POST(req: NextRequest) {
         await keepalive(async () => { assembled = await assemblerAgent(apiKey, smoothedChunks); });
         const finalWords = assembled.trim().split(/\s+/).length;
         send({ stage: 'assembler', status: 'done', output: assembled, wordCount: finalWords, avgScore: Math.round(avgScore) });
+
+        // Save to Firestore (fire-and-forget)
+        adminDb.collection('translations').add({
+          uid: authUser.uid,
+          email: authUser.email,
+          chapterTitle: chapterTitle || null,
+          bookId: bookId || null,
+          bookTitle: bookTitle || null,
+          chapterIndex: chapterIndex ?? null,
+          totalChapters: totalChapters ?? null,
+          inputWordCount: wordCount,
+          outputWordCount: finalWords,
+          avgScore: Math.round(avgScore),
+          output: assembled,
+          inputPreview: text.slice(0, 300),
+          createdAt: new Date().toISOString(),
+        }).catch((err: unknown) => console.error('Firestore save error:', err));
 
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : 'Unknown error';

@@ -1,6 +1,8 @@
 'use client';
 
 import { useState, useRef, useCallback, useEffect } from 'react';
+import { useAuth } from '../lib/auth-context';
+import { useRouter } from 'next/navigation';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -155,7 +157,7 @@ function fileTypeLabel(name: string): string {
 
 type UploadPhase = 'idle' | 'uploading' | 'processing' | 'done' | 'error';
 
-function FileUpload({ onExtracted, disabled }: { onExtracted: (text: string, filename: string, chapters: Array<{ title: string; startLine: number }> | null) => void; disabled: boolean }) {
+function FileUpload({ onExtracted, disabled, getToken }: { onExtracted: (text: string, filename: string, chapters: Array<{ title: string; startLine: number }> | null) => void; disabled: boolean; getToken: () => Promise<string | null> }) {
   const [dragging, setDragging]           = useState(false);
   const [selectedFile, setSelectedFile]   = useState<File | null>(null);
   const [phase, setPhase]                 = useState<UploadPhase>('idle');
@@ -164,12 +166,13 @@ function FileUpload({ onExtracted, disabled }: { onExtracted: (text: string, fil
   const inputRef = useRef<HTMLInputElement>(null);
   const xhrRef   = useRef<XMLHttpRequest | null>(null);
 
-  const startUpload = (file: File) => {
+  const startUpload = async (file: File) => {
     setSelectedFile(file);
     setError(null);
     setPhase('uploading');
     setUploadProgress(0);
 
+    const token = await getToken();
     const fd = new FormData();
     fd.append('file', file);
 
@@ -212,6 +215,7 @@ function FileUpload({ onExtracted, disabled }: { onExtracted: (text: string, fil
 
     xhr.timeout = 300000; // 5 min
     xhr.open('POST', '/api/upload');
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
     xhr.send(fd);
   };
 
@@ -484,6 +488,9 @@ function ChunkCard({ chunk, expanded, onToggle }: { chunk: ChunkData; expanded: 
 // ── Main Page ──────────────────────────────────────────────────────────────────
 
 export default function Home() {
+  const { user, loading, signOut, getIdToken } = useAuth();
+  const router = useRouter();
+
   const [tab, setTab]             = useState<Tab>('input');
   const [inputMode, setInputMode] = useState<InputMode>('paste');
   const [inputText, setInputText] = useState('');
@@ -507,6 +514,11 @@ export default function Home() {
   const abortRef  = useRef<AbortController | null>(null);
   const chunkMap  = useRef<Record<number, ChunkData>>({});
 
+  // Auth redirect
+  useEffect(() => {
+    if (!loading && !user) router.push('/login');
+  }, [user, loading, router]);
+
   const updateStage = useCallback((id: string, updates: Partial<StageState>) => {
     setStages(prev => prev.map(s => s.id === id ? { ...s, ...updates } : s));
   }, []);
@@ -519,16 +531,17 @@ export default function Home() {
 
   // ── Run a single section through the pipeline ──────────────────────────────
 
-  const runSection = async (text: string, chapterTitle?: string): Promise<{ output: string; avg: number; wordCount: number } | null> => {
+  const runSection = async (text: string, chapterTitle?: string, bookId?: string, chapterIndex?: number, totalChapters?: number): Promise<{ output: string; avg: number; wordCount: number } | null> => {
     setStages(INITIAL_STAGES);
     setChunks([]);
     setExpandedChunks(new Set());
     chunkMap.current = {};
 
+    const token = await getIdToken();
     const response = await fetch('/api/translate', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, chapterTitle }),
+      headers: { 'Content-Type': 'application/json', ...(token ? { 'Authorization': `Bearer ${token}` } : {}) },
+      body: JSON.stringify({ text, chapterTitle, bookId, chapterIndex, totalChapters, bookTitle: uploadedFilename || undefined }),
       signal: abortRef.current?.signal,
     });
 
@@ -676,6 +689,7 @@ export default function Home() {
 
     try {
       if (isBookMode && bookChapters.length > 0) {
+        const bookRunId = crypto.randomUUID();
         const allOutputs: string[] = new Array(bookChapters.length).fill('');
         const chapterLines = inputText.split('\n');
 
@@ -693,7 +707,7 @@ export default function Home() {
           }
 
           try {
-            const res = await runSection(chText, bookChapters[i].title);
+            const res = await runSection(chText, bookChapters[i].title, bookRunId, i, bookChapters.length);
             if (res) {
               allOutputs[i] = res.output;
               setBookOutputs([...allOutputs]);
@@ -769,6 +783,14 @@ export default function Home() {
 
   // ── Render ────────────────────────────────────────────────────────────────────
 
+  if (loading || !user) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg)' }}>
+        <div style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 20, color: 'var(--text-muted)', fontStyle: 'italic' }}>Loading…</div>
+      </div>
+    );
+  }
+
   const errorBanner = pipelineError && (
     <div style={{ background: 'var(--red-bg)', border: '1px solid var(--red-border)', borderRadius: 'var(--radius)', padding: '14px 18px', fontSize: 13, color: 'var(--red)', fontWeight: 300, marginBottom: 20 }}>
       <strong style={{ fontWeight: 600 }}>Error: </strong>{pipelineError}
@@ -779,16 +801,29 @@ export default function Home() {
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
 
       {/* Header */}
-      <header ref={headerRef} style={{ background: 'var(--bg-white)', borderBottom: '1px solid var(--border)', position: 'sticky', top: 0, zIndex: 100, padding: '14px 20px' }}>
-        <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: 3, textTransform: 'uppercase', color: 'var(--text-light)', marginBottom: 2 }}>
-          BAPS Swaminarayan · Aksharpith
+      <header ref={headerRef} style={{ background: 'var(--bg-white)', borderBottom: '1px solid var(--border)', position: 'sticky', top: 0, zIndex: 100, padding: '14px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div>
+          <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: 3, textTransform: 'uppercase', color: 'var(--text-light)', marginBottom: 2 }}>
+            BAPS Swaminarayan · Aksharpith
+          </div>
+          <div style={{ fontFamily: '"Cormorant Garamond", serif', fontWeight: 300, fontSize: 26, color: 'var(--text)', letterSpacing: '-0.3px' }}>
+            Translation <em>Pipeline</em>
+            <span style={{ fontFamily: "'Karla', sans-serif", fontSize: 10, fontWeight: 600, letterSpacing: 1, color: 'var(--text-light)', marginLeft: 12, verticalAlign: 'middle' }}>
+              6 AGENTS · GOLD STANDARD
+            </span>
+          </div>
         </div>
-        <div style={{ fontFamily: '"Cormorant Garamond", serif', fontWeight: 300, fontSize: 26, color: 'var(--text)', letterSpacing: '-0.3px' }}>
-          Translation <em>Pipeline</em>
-          <span style={{ fontFamily: "'Karla', sans-serif", fontSize: 10, fontWeight: 600, letterSpacing: 1, color: 'var(--text-light)', marginLeft: 12, verticalAlign: 'middle' }}>
-            6 AGENTS · GOLD STANDARD
-          </span>
-        </div>
+        {user && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <span style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 300 }}>{user.email}</span>
+            <button onClick={() => router.push('/history')} style={{ fontSize: 11, fontWeight: 500, color: 'var(--text-light)', background: 'none', border: '1px solid var(--border)', borderRadius: 6, padding: '6px 12px', cursor: 'pointer', fontFamily: "'Karla', sans-serif" }}>
+              History
+            </button>
+            <button onClick={signOut} style={{ fontSize: 11, fontWeight: 500, color: 'var(--text-light)', background: 'none', border: '1px solid var(--border)', borderRadius: 6, padding: '6px 12px', cursor: 'pointer', fontFamily: "'Karla', sans-serif" }}>
+              Sign out
+            </button>
+          </div>
+        )}
       </header>
 
       {/* Tabs */}
@@ -837,7 +872,7 @@ export default function Home() {
 
             {inputMode === 'upload' ? (
               <>
-                <FileUpload onExtracted={handleFileExtracted} disabled={isRunning} />
+                <FileUpload onExtracted={handleFileExtracted} disabled={isRunning} getToken={getIdToken} />
                 {inputText && (
                   <div style={{ marginTop: 14, padding: '12px 16px', background: 'var(--bg-warm)', border: '1px solid var(--border)', borderRadius: 6 }}>
                     <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: 1, textTransform: 'uppercase', color: 'var(--green)', marginBottom: 4 }}>

@@ -1,6 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  serverExternalPackages: ['mammoth'],
+  serverExternalPackages: ['mammoth', 'firebase-admin'],
 };
 
 export default nextConfig;

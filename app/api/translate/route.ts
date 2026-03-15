@@ -14,10 +14,12 @@ const HAIKU  = 'claude-haiku-4-5-20251001';
 const BATCH  = 3;                // parallel chunk concurrency
 const RECHECK_THRESHOLD = 93;   // re-review chunks scoring below this
 const MAX_REVIEW_ROUNDS = 2;    // max iterative review rounds per chunk
+const API_TIMEOUT_MS    = 120_000; // 120s per Claude call
+const MAX_RETRIES       = 2;      // retries for transient errors
 
-// ─── Anthropic API helper ──────────────────────────────────────────────────────
+// ─── Anthropic API helper (with timeout + retry) ────────────────────────────
 
-function callClaude(params: {
+function callClaudeOnce(params: {
   model: string; max_tokens: number; system: string;
   messages: Array<{ role: string; content: string }>; apiKey: string;
 }): Promise<string> {
@@ -36,35 +38,64 @@ function callClaude(params: {
       let raw = '';
       res.on('data', c => { raw += c; });
       res.on('end', () => {
-        if (res.statusCode && res.statusCode >= 400) {
-          reject(new Error(`Anthropic API ${res.statusCode}: ${raw.slice(0, 300)}`));
+        if (!res.statusCode || res.statusCode >= 400) {
+          const code = res.statusCode ?? 0;
+          reject(Object.assign(new Error(`Anthropic API ${code}: ${raw.slice(0, 300)}`), { statusCode: code }));
           return;
         }
         try {
-          const data = JSON.parse(raw) as { content: Array<{ type: string; text: string }> };
-          resolve(data.content?.[0]?.text?.trim() ?? '');
+          const data = JSON.parse(raw) as { content?: Array<{ type: string; text?: string }> };
+          const text = data.content?.[0]?.text?.trim();
+          if (!text) { reject(new Error('Empty response from Anthropic API')); return; }
+          resolve(text);
         } catch { reject(new Error('Parse error: ' + raw.slice(0, 200))); }
       });
     });
+    req.setTimeout(API_TIMEOUT_MS, () => { req.destroy(); reject(new Error('Anthropic API timeout')); });
     req.on('error', reject);
     req.write(body);
     req.end();
   });
 }
 
-// ─── Parallel batch helper ──────────────────────────────────────────────────
+async function callClaude(params: {
+  model: string; max_tokens: number; system: string;
+  messages: Array<{ role: string; content: string }>; apiKey: string;
+}): Promise<string> {
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      return await callClaudeOnce(params);
+    } catch (err: unknown) {
+      const code = (err as { statusCode?: number }).statusCode ?? 0;
+      const isRetryable = code === 429 || code === 500 || code === 529 || (err instanceof Error && err.message === 'Anthropic API timeout');
+      if (isRetryable && attempt < MAX_RETRIES) {
+        const delay = Math.min(1000 * Math.pow(2, attempt), 8000);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error('Max retries exceeded');
+}
+
+// ─── Parallel batch helper (tolerant of individual failures) ────────────────
 
 async function parallelBatch<T>(
   items: T[], fn: (item: T, index: number) => Promise<void>, batchSize: number,
 ): Promise<void> {
   for (let start = 0; start < items.length; start += batchSize) {
     const batch = items.slice(start, start + batchSize);
-    await Promise.all(batch.map((item, bi) => fn(item, start + bi)));
+    const results = await Promise.allSettled(batch.map((item, bi) => fn(item, start + bi)));
+    // Re-throw the first failure so the pipeline can handle it
+    const firstFailure = results.find(r => r.status === 'rejected');
+    if (firstFailure && firstFailure.status === 'rejected') throw firstFailure.reason;
   }
 }
 
 // Safe slice that doesn't cut mid-word
 function safeSlice(s: string, max: number): string {
+  if (max <= 0) return '';
   if (s.length <= max) return s;
   const cut = s.lastIndexOf(' ', max);
   return cut > 0 ? s.slice(0, cut) : s.slice(0, max);
@@ -87,6 +118,7 @@ AKSHARPITH HOUSE-STYLE RULES (NON-NEGOTIABLE):
    - Use \u0101 ONLY when directly quoting poetic/canonical verses (e.g., \u201c\u0100tm\u0101 j\u0101go re\u2026\u201d)
    - NEVER use macrons (\u012b, \u016b, \u1e5b, \u1e45, etc.) in prose.
    - In prose: prapti, bhakti, anand, murti (no diacritics).
+   - BOUNDARY RULE: If a verse is quoted inline within a prose paragraph, diacritics apply ONLY within the quoted verse portion. The surrounding prose must remain diacritics-free.
 
 4. MANDATORY TERMINOLOGY:
    - mandir (NEVER "temple")
@@ -182,33 +214,32 @@ const PROTECTED_TERMS = 'mandir, seva, satsang, arti, vichran, mukhpath, katha, 
 // If the full text is ≤500 words, returns it as a single chunk.
 
 function deterministicChunk(text: string): string[] {
-  const totalWords = text.trim().split(/\s+/).length;
-  if (totalWords <= 500) return [text.trim()];
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+  const totalWords = trimmed.split(/\s+/).filter(Boolean).length;
+  if (totalWords <= 500) return [trimmed];
 
-  const paragraphs = text.split(/\n\s*\n/);
+  const paragraphs = trimmed.split(/\n\s*\n/);
   const chunks: string[] = [];
   let current: string[] = [];
   let currentWords = 0;
 
   for (const para of paragraphs) {
-    const trimmed = para.trim();
-    if (!trimmed) continue;
-    const paraWords = trimmed.split(/\s+/).length;
+    const p = para.trim();
+    if (!p) continue;
+    const paraWords = p.split(/\s+/).length;
 
-    // If adding this paragraph would exceed 500 words and we already have ≥300
     if (currentWords + paraWords > 500 && currentWords >= 300) {
       chunks.push(current.join('\n\n'));
-      current = [trimmed];
+      current = [p];
       currentWords = paraWords;
     } else {
-      current.push(trimmed);
+      current.push(p);
       currentWords += paraWords;
     }
   }
 
-  // Flush remaining
   if (current.length > 0) {
-    // If the last chunk is too small (<150 words) and there's a previous chunk, merge it
     if (currentWords < 150 && chunks.length > 0) {
       chunks[chunks.length - 1] += '\n\n' + current.join('\n\n');
     } else {
@@ -216,7 +247,7 @@ function deterministicChunk(text: string): string[] {
     }
   }
 
-  return chunks.length > 0 ? chunks : [text.trim()];
+  return chunks.length > 0 ? chunks : [trimmed];
 }
 
 // ─── System Prompts ──────────────────────────────────────────────────────────
@@ -233,7 +264,9 @@ ALREADY-ENGLISH TEXT: If a passage in the source is already in English, reproduc
 
 MINDSET: Every sentence carries devotional, historical, and doctrinal weight. Preserve it completely. Provide ONLY the English translation \u2014 no preamble, no notes, no commentary.`;
 
-const REVIEWER_SYSTEM = `You are a BAPS translation auditor and senior style reviewer for Aksharpith. Perform a combined certification and style audit in a single pass.
+const REVIEWER_SYSTEM = `You are a BAPS translation auditor and senior style reviewer for Aksharpith. You are reviewing text produced by ANOTHER translator \u2014 you did NOT write this text. Perform a combined certification and style audit in a single pass.
+
+IMPORTANT: You are an INDEPENDENT auditor. Score objectively against the checklist. Do not inflate scores. If you produce a revised translation, you are correcting the original translator's work, not your own.
 
 PART 1 \u2014 BAPS CERTIFICATION CHECKLIST (8 categories):
 
@@ -246,7 +279,7 @@ A. TERMINOLOGY \u2014 Verify mandatory terms:
 
 B. PUNCTUATION \u2014 Curly quotes \u201c \u201d (NEVER straight) | Spaced en dash ( \u2013 ) NEVER em dash
 
-C. DIACRITICS \u2014 NO macrons in prose. Only inside quoted verse.
+C. DIACRITICS \u2014 NO macrons in prose. Only inside quoted verse. If a verse is quoted inline within prose, diacritics apply ONLY within the quoted verse portion.
 
 D. TONE \u2014 British English, Oxford -ize (organize, realize, colour, travelling, programme, fulfil). No American marketing. No "mythology" for sacred texts. Dignified, measured, reverent register.
 
@@ -284,7 +317,7 @@ Produce a corrected revised translation fixing ALL certification and style issue
 Return ONLY valid JSON (no fences):
 {"categories": [{"id": "A", "name": "Terminology", "pass": true, "issues": []}, ...], "pitfalls": [], "issues": [], "score": <0-100>, "revised": "...", "certifiable": false}`;
 
-const SMOOTHER_SYSTEM = `You are a senior editorial reader for Aksharpith performing a final readability pass.
+const SMOOTHER_SYSTEM = `You are a senior editorial reader for Aksharpith performing a final readability pass. The text you receive has already been certified by a BAPS auditor \u2014 all terminology, punctuation, and diacritics are correct. Your job is ONLY to improve prose flow.
 
 IMPROVE:
 - Smooth awkward phrasing and unnatural flow in narrative prose
@@ -297,7 +330,9 @@ NEVER CHANGE:
 - Transliterated verses and their translations \u2014 reproduce in full
 - All proper nouns, Sanskrit/Gujarati terms, place names, personal names
 - All dates, numbers, time stamps
+- Curly quotes (\u201c \u201d), spaced en dashes ( \u2013 ), and all punctuation formatting
 - These BAPS terms (never replace with English equivalents): ${PROTECTED_TERMS}
+- Any phrasing that appears deliberately structured for doctrinal precision, even if slightly awkward in English
 
 If the input is entirely verse/poetry with no narrative prose, return it unchanged.
 
@@ -350,7 +385,8 @@ interface ReviewResult {
 }
 
 async function reviewerAgent(apiKey: string, original: string, translation: string): Promise<ReviewResult> {
-  const fallback: ReviewResult = { categories: [], pitfalls: [], issues: [], score: 75, revised: translation, certifiable: false };
+  // Fallback score is 0 (not 75) so it always triggers re-review on parse failure
+  const fallback: ReviewResult = { categories: [], pitfalls: [], issues: [], score: 0, revised: translation, certifiable: false };
   const raw = await callClaude({
     model: OPUS, max_tokens: 8192, apiKey,
     system: REVIEWER_SYSTEM,
@@ -364,7 +400,7 @@ async function reviewerAgent(apiKey: string, original: string, translation: stri
       categories:  Array.isArray(p.categories) ? p.categories : [],
       pitfalls:    Array.isArray(p.pitfalls) ? p.pitfalls.filter((s: unknown) => typeof s === 'string') : [],
       issues:      Array.isArray(p.issues) ? p.issues.filter((s: unknown) => typeof s === 'string') : [],
-      score:       typeof p.score === 'number' ? Math.max(0, Math.min(100, p.score)) : 75,
+      score:       typeof p.score === 'number' ? Math.max(0, Math.min(100, p.score)) : 0,
       revised:     typeof p.revised === 'string' && p.revised.trim() ? p.revised.trim() : translation,
       certifiable: typeof p.certifiable === 'boolean' ? p.certifiable : false,
     };
@@ -383,7 +419,7 @@ async function assemblerAgent(apiKey: string, smoothedChunks: string[]): Promise
   const combined = smoothedChunks.join('\n\n');
   if (smoothedChunks.length === 1) return combined;
   return callClaude({
-    model: SONNET, max_tokens: 16000, apiKey,
+    model: SONNET, max_tokens: 32000, apiKey,
     system: ASSEMBLER_SYSTEM,
     messages: [{ role: 'user', content: `Assemble these chunks into a single document:\n\n${combined}` }],
   });
@@ -406,17 +442,24 @@ export async function POST(req: NextRequest) {
     return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 });
   }
 
-  const body = await req.json().catch(() => ({}));
+  const body = await req.json().catch(() => null);
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return new Response(JSON.stringify({ error: 'Invalid request body' }), { status: 400 });
+  }
+
   const { text, chapterTitle, bookId, chapterIndex, totalChapters, bookTitle } = body as {
     text?: string; chapterTitle?: string;
     bookId?: string; chapterIndex?: number; totalChapters?: number; bookTitle?: string;
   };
 
-  if (!text?.trim()) {
+  if (!text || !text.trim()) {
     return new Response(JSON.stringify({ error: 'No text provided' }), { status: 400 });
   }
 
-  const wordCount = text.trim().split(/\s+/).length;
+  const wordCount = text.trim().split(/\s+/).filter(Boolean).length;
+  if (wordCount === 0) {
+    return new Response(JSON.stringify({ error: 'No text provided' }), { status: 400 });
+  }
   if (wordCount > 50000) {
     return new Response(JSON.stringify({ error: `Section too long (${wordCount.toLocaleString()} words). Maximum is 50,000.` }), { status: 400 });
   }
@@ -426,14 +469,17 @@ export async function POST(req: NextRequest) {
     return new Response(JSON.stringify({ error: 'ANTHROPIC_API_KEY not set' }), { status: 500 });
   }
 
+  let streamClosed = false;
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
-      const send = (data: Record<string, unknown>) =>
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+      const send = (data: Record<string, unknown>) => {
+        if (streamClosed) return;
+        try { controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`)); } catch { /* stream closed */ }
+      };
 
-      // Global keepalive — single interval for the entire stream
       const keepaliveInterval = setInterval(() => {
+        if (streamClosed) return;
         try { controller.enqueue(encoder.encode(': keepalive\n\n')); } catch { /* closed */ }
       }, 10000);
 
@@ -443,6 +489,7 @@ export async function POST(req: NextRequest) {
         // ── Stage 1: Chunker (deterministic) ────────────────────────────
         send({ stage: 'chunker', status: 'running' });
         const chunks = await chunkerAgent(apiKey, text);
+        if (chunks.length === 0) { send({ error: 'No content to translate' }); return; }
         send({ stage: 'chunker', status: 'done', count: chunks.length, chunks, context });
 
         // ── Stage 2: Translator (Opus, sequential — cross-chunk memory) ─
@@ -489,7 +536,7 @@ export async function POST(req: NextRequest) {
         }
 
         const certCount = reviews.filter(r => r.certifiable).length;
-        const avgScore = reviews.reduce((s, r) => s + r.score, 0) / reviews.length;
+        const avgScore = chunks.length > 0 ? reviews.reduce((s, r) => s + r.score, 0) / chunks.length : 0;
         send({ stage: 'reviewer', status: 'done', certCount, total: chunks.length, avgScore, rechecked: totalRechecks });
 
         // ── Stage 4: Smoother (Sonnet, parallel) ────────────────────────
@@ -507,25 +554,30 @@ export async function POST(req: NextRequest) {
         // ── Stage 5: Assembler (Sonnet) ─────────────────────────────────
         send({ stage: 'assembler', status: 'running' });
         const assembled = await assemblerAgent(apiKey, smoothedChunks);
-        const finalWords = assembled.trim().split(/\s+/).length;
+        const finalWords = assembled.trim().split(/\s+/).filter(Boolean).length;
         send({ stage: 'assembler', status: 'done', output: assembled, wordCount: finalWords, avgScore: Math.round(avgScore) });
 
-        // Save to Firestore (fire-and-forget)
-        adminDb.collection('translations').add({
-          uid: authUser.uid,
-          email: authUser.email,
-          chapterTitle: chapterTitle || null,
-          bookId: bookId || null,
-          bookTitle: bookTitle || null,
-          chapterIndex: chapterIndex ?? null,
-          totalChapters: totalChapters ?? null,
-          inputWordCount: wordCount,
-          outputWordCount: finalWords,
-          avgScore: Math.round(avgScore),
-          output: assembled,
-          inputPreview: text.slice(0, 300),
-          createdAt: new Date().toISOString(),
-        }).catch((err: unknown) => console.error('Firestore save error:', err));
+        // Save to Firestore (with error notification)
+        try {
+          await adminDb.collection('translations').add({
+            uid: authUser.uid,
+            email: authUser.email,
+            chapterTitle: chapterTitle || null,
+            bookId: bookId || null,
+            bookTitle: bookTitle || null,
+            chapterIndex: chapterIndex ?? null,
+            totalChapters: totalChapters ?? null,
+            inputWordCount: wordCount,
+            outputWordCount: finalWords,
+            avgScore: Math.round(avgScore),
+            output: assembled,
+            inputPreview: text.slice(0, 300),
+            createdAt: new Date().toISOString(),
+          });
+        } catch (err: unknown) {
+          console.error('Firestore save error:', err);
+          send({ warning: 'Translation complete but could not save to history. Copy your output now.' });
+        }
 
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : 'Unknown error';
@@ -533,7 +585,8 @@ export async function POST(req: NextRequest) {
         send({ error: msg });
       } finally {
         clearInterval(keepaliveInterval);
-        controller.close();
+        streamClosed = true;
+        try { controller.close(); } catch { /* already closed */ }
       }
     },
   });

@@ -6,13 +6,14 @@ import { verifyAuthToken } from '../../../lib/verify-auth';
 export const dynamic    = 'force-dynamic';
 export const maxDuration = 300;
 
-// ── Size limits ───────────────────────────────────────────────────────────────
+// ─── Size limits ───────────────────────────────────────────────────────────────
 
 const MAX_FILE_SIZE  = 100 * 1024 * 1024; // 100MB (Vercel Pro)
 const MAX_CLAUDE_PDF = 32  * 1024 * 1024; // Claude API limit for PDFs
 const MAX_CLAUDE_IMG = 20  * 1024 * 1024; // Claude API limit for images
+const API_TIMEOUT_MS = 120_000;           // 120s timeout for extraction
 
-// ── Supported image types for Claude vision ───────────────────────────────────
+// ─── Supported image types for Claude vision ───────────────────────────────────
 
 const IMAGE_MEDIA: Record<string, string> = {
   png:  'image/png',
@@ -22,7 +23,7 @@ const IMAGE_MEDIA: Record<string, string> = {
   webp: 'image/webp',
 };
 
-// ── Claude extraction (PDF + image OCR) ───────────────────────────────────────
+// ─── Claude extraction (PDF + image OCR) ───────────────────────────────────────
 
 function callClaudeExtract(
   apiKey: string, base64: string, mediaType: string, prompt: string,
@@ -34,7 +35,7 @@ function callClaudeExtract(
       : { type: 'document', source: { type: 'base64', media_type: mediaType, data: base64 } };
 
     const body = JSON.stringify({
-      model:      'claude-haiku-4-5-20251001', // Haiku: fast extraction, Sonnet reserved for translation
+      model:      'claude-haiku-4-5-20251001',
       max_tokens: 16000,
       messages: [{ role: 'user', content: [contentBlock, { type: 'text', text: prompt }] }],
     });
@@ -53,23 +54,48 @@ function callClaudeExtract(
       let raw = '';
       res.on('data', c => { raw += c; });
       res.on('end', () => {
-        if (res.statusCode && res.statusCode >= 400) {
-          reject(new Error(`Claude ${res.statusCode}: ${raw.slice(0, 300)}`));
+        if (!res.statusCode || res.statusCode >= 400) {
+          reject(new Error(`Claude ${res.statusCode ?? 0}: ${raw.slice(0, 300)}`));
           return;
         }
         try {
-          const data = JSON.parse(raw) as { content: Array<{ type: string; text: string }> };
-          resolve(data.content?.[0]?.text?.trim() ?? '');
+          const data = JSON.parse(raw) as { content?: Array<{ type: string; text?: string }> };
+          const text = data.content?.[0]?.text?.trim();
+          if (!text) { reject(new Error('Empty response from Claude extraction')); return; }
+          resolve(text);
         } catch { reject(new Error('Parse error: ' + raw.slice(0, 200))); }
       });
     });
+    req.setTimeout(API_TIMEOUT_MS, () => { req.destroy(); reject(new Error('Claude extraction timeout')); });
     req.on('error', reject);
     req.write(body);
     req.end();
   });
 }
 
-// ── Extraction prompts ────────────────────────────────────────────────────────
+// ─── HTML entity decoder ─────────────────────────────────────────────────────
+
+function decodeHtmlEntities(html: string): string {
+  return html
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n, 10)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#039;/g, "'")
+    .replace(/&rsquo;/g, '\u2019')
+    .replace(/&lsquo;/g, '\u2018')
+    .replace(/&rdquo;/g, '\u201d')
+    .replace(/&ldquo;/g, '\u201c')
+    .replace(/&ndash;/g, '\u2013')
+    .replace(/&mdash;/g, '\u2014')
+    .replace(/&hellip;/g, '\u2026');
+}
+
+// ─── Extraction prompts ────────────────────────────────────────────────────────
 
 const PDF_PROMPT = `Extract ALL text from this PDF document exactly as written. Preserve:
 - Every paragraph (blank line between paragraphs)
@@ -91,7 +117,7 @@ const IMAGE_PROMPT = `Extract ALL text from this image exactly as written. This 
 
 Return ONLY the extracted text — no commentary, no notes, no preamble.`;
 
-// ── Chapter detection ─────────────────────────────────────────────────────────
+// ─── Chapter detection ─────────────────────────────────────────────────────────
 
 const SECTION_WORDS = 4000;
 
@@ -102,6 +128,9 @@ function detectChapters(text: string): Array<{ title: string; startLine: number 
 
   const chapters: Array<{ title: string; startLine: number }> = [];
   const skip = Math.min(50, Math.floor(lines.length * 0.05));
+
+  // Guard: if skip >= lines.length, skip chapter detection
+  if (skip >= lines.length) return splitByWordCount(lines, SECTION_WORDS);
 
   for (let i = skip; i < lines.length; i++) {
     const line = lines[i].trim();
@@ -130,6 +159,9 @@ function splitByWordCount(lines: string[], targetWords: number): Array<{ title: 
   let wordsSinceLastSplit = 0;
   let sectionIndex = 1;
   const skip = Math.min(50, Math.floor(lines.length * 0.05));
+
+  if (skip >= lines.length) return [];
+
   sections.push({ title: 'Section 1', startLine: skip });
 
   for (let i = skip; i < lines.length; i++) {
@@ -151,7 +183,7 @@ function splitByWordCount(lines: string[], targetWords: number): Array<{ title: 
   return sections.length > 1 ? sections : [];
 }
 
-// ── Route handler ─────────────────────────────────────────────────────────────
+// ─── Route handler ─────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
   try {
@@ -164,8 +196,12 @@ export async function POST(req: NextRequest) {
     const formData = await req.formData().catch(() => null);
     if (!formData) return Response.json({ error: 'Invalid form data' }, { status: 400 });
 
-    const file = formData.get('file') as File | null;
-    if (!file || !file.name) return Response.json({ error: 'No file provided' }, { status: 400 });
+    const fileField = formData.get('file');
+    if (!fileField || typeof fileField === 'string' || !('arrayBuffer' in fileField)) {
+      return Response.json({ error: 'No file provided' }, { status: 400 });
+    }
+    const file = fileField as File;
+    if (!file.name) return Response.json({ error: 'No file provided' }, { status: 400 });
 
     // ── Size validation ─────────────────────────────────────────────
     if (file.size > MAX_FILE_SIZE) {
@@ -179,7 +215,17 @@ export async function POST(req: NextRequest) {
     }
 
     const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
-    const buf = Buffer.from(await file.arrayBuffer());
+    if (!ext) {
+      return Response.json({ error: 'File has no extension. Supported formats: PDF, DOCX, DOC, TXT, PNG, JPG, WEBP, GIF' }, { status: 400 });
+    }
+
+    let buf: Buffer;
+    try {
+      buf = Buffer.from(await file.arrayBuffer());
+    } catch {
+      return Response.json({ error: 'Could not read file. The upload may be corrupted.' }, { status: 400 });
+    }
+
     let extracted = '';
 
     // ── PDF: Claude vision (handles multi-page natively, up to 100 pages)
@@ -204,20 +250,21 @@ export async function POST(req: NextRequest) {
 
     // ── DOCX: mammoth (preserving paragraph breaks)
     else if (ext === 'docx') {
-      const result = await mammoth.convertToHtml({ buffer: buf });
-      // Convert HTML to text while preserving paragraph breaks
-      extracted = result.value
-        .replace(/<\/p>/g, '\n\n')  // Double newline for paragraph breaks
-        .replace(/<br\/>/g, '\n')    // Single newline for line breaks
-        .replace(/<[^>]+>/g, '')     // Remove all remaining HTML tags
-        .replace(/&nbsp;/g, ' ')     // Replace non-breaking spaces
-        .replace(/&amp;/g, '&')      // Decode entities
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>')
-        .replace(/&quot;/g, '"')
-        .replace(/&#039;/g, "'")
-        .replace(/\n{3,}/g, '\n\n')  // Collapse 3+ newlines to 2
-        .trim();
+      try {
+        const result = await mammoth.convertToHtml({ buffer: buf });
+        extracted = decodeHtmlEntities(
+          result.value
+            .replace(/<\/p>/g, '\n\n')
+            .replace(/<br\/>/g, '\n')
+            .replace(/<[^>]+>/g, '')
+        )
+          .replace(/\n{3,}/g, '\n\n')
+          .trim();
+      } catch {
+        return Response.json({
+          error: 'Could not read this DOCX file. It may be corrupted or password-protected. Try re-saving it or converting to PDF.',
+        }, { status: 422 });
+      }
     }
 
     // ── DOC (legacy): attempt mammoth, graceful fallback
@@ -252,7 +299,7 @@ export async function POST(req: NextRequest) {
     }
 
     const chapters  = detectChapters(extracted);
-    const wordCount = extracted.trim().split(/\s+/).length;
+    const wordCount = extracted.trim().split(/\s+/).filter(Boolean).length;
 
     return Response.json({
       text:       extracted,

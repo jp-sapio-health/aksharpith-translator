@@ -903,7 +903,7 @@ export default function Home() {
           <div style={{ fontFamily: '"Cormorant Garamond", serif', fontWeight: 300, fontSize: 26, color: 'var(--text)', letterSpacing: '-0.3px' }}>
             Translation <em>Pipeline</em>
             <span style={{ fontFamily: "'Karla', sans-serif", fontSize: 10, fontWeight: 600, letterSpacing: 1, color: 'var(--text-light)', marginLeft: 12, verticalAlign: 'middle' }}>
-              6 AGENTS · GOLD STANDARD
+              5 AGENTS \u00b7 GOLD STANDARD
             </span>
           </div>
         </div>

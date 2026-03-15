@@ -3,7 +3,7 @@ import mammoth from 'mammoth';
 import { NextRequest } from 'next/server';
 
 export const dynamic    = 'force-dynamic';
-export const maxDuration = 120; // large files + Claude extraction
+export const maxDuration = 300;
 
 // ── Size limits ───────────────────────────────────────────────────────────────
 

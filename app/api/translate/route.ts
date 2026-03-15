@@ -8,10 +8,12 @@ export const maxDuration = 300;
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
+const OPUS   = 'claude-opus-4-20250514';
 const SONNET = 'claude-sonnet-4-20250514';
 const HAIKU  = 'claude-haiku-4-5-20251001';
 const BATCH  = 3;                // parallel chunk concurrency
-const RECHECK_THRESHOLD = 80;   // re-review chunks scoring below this
+const RECHECK_THRESHOLD = 95;   // re-review chunks scoring below this
+const MAX_REVIEW_ROUNDS = 3;    // max iterative R1→R2 rounds per chunk
 
 // ─── Anthropic API helper ──────────────────────────────────────────────────────
 
@@ -335,7 +337,7 @@ async function translatorAgent(
 ): Promise<string> {
   const memorySection = translationMemory ? `\nTRANSLATION MEMORY (decisions from previous chunks \u2014 maintain consistency):\n${translationMemory}\n\n${'─'.repeat(40)}\n` : '';
   return callClaude({
-    model: SONNET, max_tokens: 4096, apiKey,
+    model: OPUS, max_tokens: 8192, apiKey,
     system: TRANSLATOR_SYSTEM,
     messages: [{ role: 'user', content: `${memorySection}Chunk ${chunkIndex + 1} of ${totalChunks}. Translate the following Gujarati text to English. Provide ONLY the translation.\n\nGUJARATI:\n${chunk}` }],
   });
@@ -354,7 +356,7 @@ interface Reviewer1Result {
 async function reviewer1Agent(apiKey: string, original: string, translation: string): Promise<Reviewer1Result> {
   const fallback: Reviewer1Result = { categories: [], pitfalls: [], score: 75, revised: translation, certifiable: false };
   const raw = await callClaude({
-    model: SONNET, max_tokens: 8192, apiKey,
+    model: OPUS, max_tokens: 8192, apiKey,
     system: REVIEWER1_SYSTEM,
     messages: [{ role: 'user', content: `GUJARATI SOURCE:\n${original}\n\nTRANSLATION TO AUDIT:\n${translation}` }],
   });
@@ -473,9 +475,10 @@ export async function POST(req: NextRequest) {
           translations[i] = await translatorAgent(apiKey, chunks[i], translationMemory, i, chunks.length);
           send({ stage: 'translator', status: 'progress', current: i + 1, total: chunks.length, index: i, translation: translations[i] });
           if (i < chunks.length - 1) {
-            extractTranslationMemory(apiKey, chunks[i], translations[i])
-              .then(mem => { if (mem) translationMemory = (translationMemory + '\n' + mem).trim().slice(-2000); })
-              .catch(() => {});
+            try {
+              const mem = await extractTranslationMemory(apiKey, chunks[i], translations[i]);
+              if (mem) translationMemory = (translationMemory + '\n' + mem).trim().slice(-2000);
+            } catch { /* non-critical — continue without memory */ }
           }
         }
         send({ stage: 'translator', status: 'done', memorySize: translationMemory.length });
@@ -505,23 +508,25 @@ export async function POST(req: NextRequest) {
           send({ stage: 'reviewer2', status: 'progress', completed: r2Done, total: chunks.length, index: i, score: reviews[i].score, issues: reviews[i].issues, revised: reviews[i].revised });
         }, BATCH);
 
-        // ── Double-loop: re-review low-scoring chunks ──────────────────
-        const lowChunks = reviews.map((_, i) => i).filter(i => reviews[i].score < RECHECK_THRESHOLD);
-        if (lowChunks.length > 0) {
-          send({ stage: 'reviewer2', status: 'rechecking', count: lowChunks.length });
+        // ── Iterative refinement: re-review until score ≥ threshold or max rounds ─
+        let totalRechecks = 0;
+        for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
+          const lowChunks = reviews.map((_, i) => i).filter(i => reviews[i].score < RECHECK_THRESHOLD);
+          if (lowChunks.length === 0) break;
+
+          send({ stage: 'reviewer2', status: 'rechecking', count: lowChunks.length, round });
+          totalRechecks += lowChunks.length;
 
           await parallelBatch(lowChunks, async (i) => {
-            // Re-run R1 on the R2-revised text
             reviewer1Results[i] = await reviewer1Agent(apiKey, chunks[i], reviews[i].revised);
-            send({ stage: 'reviewer1', status: 'progress', completed: r1Done, total: chunks.length, index: i, categories: reviewer1Results[i].categories, pitfalls: reviewer1Results[i].pitfalls, score: reviewer1Results[i].score, certifiable: reviewer1Results[i].certifiable });
-            // Re-run R2 on the new R1-revised text
+            send({ stage: 'reviewer1', status: 'progress', completed: r1Done, total: chunks.length, index: i, categories: reviewer1Results[i].categories, pitfalls: reviewer1Results[i].pitfalls, score: reviewer1Results[i].score, certifiable: reviewer1Results[i].certifiable, round });
             reviews[i] = await reviewer2Agent(apiKey, chunks[i], reviewer1Results[i].revised);
-            send({ stage: 'reviewer2', status: 'progress', completed: r2Done, total: chunks.length, index: i, score: reviews[i].score, issues: reviews[i].issues, revised: reviews[i].revised, recheck: true });
+            send({ stage: 'reviewer2', status: 'progress', completed: r2Done, total: chunks.length, index: i, score: reviews[i].score, issues: reviews[i].issues, revised: reviews[i].revised, recheck: true, round });
           }, BATCH);
         }
 
         const avgScore = reviews.reduce((s, r) => s + r.score, 0) / reviews.length;
-        send({ stage: 'reviewer2', status: 'done', avgScore, rechecked: lowChunks.length });
+        send({ stage: 'reviewer2', status: 'done', avgScore, rechecked: totalRechecks });
 
         // ── Stage 5: Smoother — PARALLEL ───────────────────────────────
         send({ stage: 'smoother', status: 'running' });

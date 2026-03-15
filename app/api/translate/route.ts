@@ -486,7 +486,7 @@ export async function POST(req: NextRequest) {
         }, BATCH);
 
         // ── Double-loop: re-review low-scoring chunks ──────────────────
-        const lowChunks = reviews.map((r, i) => i).filter(i => reviews[i].score < RECHECK_THRESHOLD);
+        const lowChunks = reviews.map((_, i) => i).filter(i => reviews[i].score < RECHECK_THRESHOLD);
         if (lowChunks.length > 0) {
           send({ stage: 'reviewer2', status: 'rechecking', count: lowChunks.length });
 

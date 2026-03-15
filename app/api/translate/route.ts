@@ -789,10 +789,11 @@ export async function POST(req: NextRequest) {
     return new Response(JSON.stringify({ error: `Section too long (${wordCount.toLocaleString()} words). Maximum is 50,000.` }), { status: 400 });
   }
 
-  const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
+  const apiKey: string | undefined = process.env.ANTHROPIC_API_KEY?.trim();
   if (!apiKey) {
     return new Response(JSON.stringify({ error: 'ANTHROPIC_API_KEY not set' }), { status: 500 });
   }
+  const key: string = apiKey; // narrowed for use inside stream callback
 
   let streamClosed = false;
   const encoder = new TextEncoder();
@@ -813,7 +814,7 @@ export async function POST(req: NextRequest) {
 
         // ── Stage 1: Chunker (deterministic) ────────────────────────────
         send({ stage: 'chunker', status: 'running' });
-        const chunks = await chunkerAgent(apiKey, text);
+        const chunks = await chunkerAgent(key, text);
         if (chunks.length === 0) { send({ error: 'No content to translate' }); return; }
         send({ stage: 'chunker', status: 'done', count: chunks.length, chunks, context });
 
@@ -836,7 +837,7 @@ export async function POST(req: NextRequest) {
         async function processChunk(i: number) {
           // ── Translate ──
           if (!translatorStarted) { translatorStarted = true; send({ stage: 'translator', status: 'running' }); }
-          translations[i] = enforceTerminology(await translatorAgent(apiKey, chunks[i], translationMemory, i, chunks.length));
+          translations[i] = enforceTerminology(await translatorAgent(key, chunks[i], translationMemory, i, chunks.length));
           translateDone++;
           send({ stage: 'translator', status: 'progress', current: translateDone, total: chunks.length, index: i, translation: translations[i] });
           if (translateDone === chunks.length && !translatorFinished) {
@@ -847,7 +848,7 @@ export async function POST(req: NextRequest) {
           // ── Extract translation memory from EVERY chunk (Change 5) ──
           if (chunks.length > 1) {
             try {
-              const mem = await extractTranslationMemory(apiKey, chunks[i], translations[i]);
+              const mem = await extractTranslationMemory(key, chunks[i], translations[i]);
               if (mem) {
                 translationMemory = (translationMemory + '\n' + mem).trim().slice(-2000);
               }
@@ -856,14 +857,14 @@ export async function POST(req: NextRequest) {
 
           // ── Certification Review (Pass 1 — Opus) ──
           if (!reviewerStarted) { reviewerStarted = true; send({ stage: 'reviewer', status: 'running' }); }
-          reviews[i] = await reviewerAgent(apiKey, chunks[i], translations[i]);
+          reviews[i] = await reviewerAgent(key, chunks[i], translations[i]);
           send({ stage: 'reviewer', status: 'progress', completed: reviewDone + 1, total: chunks.length, index: i, categories: reviews[i].categories, pitfalls: reviews[i].pitfalls, issues: reviews[i].issues, score: reviews[i].score, certifiable: reviews[i].certifiable });
 
           // ── Re-review loop ──
           for (let round = 1; round <= MAX_REVIEW_ROUNDS && reviews[i].score < RECHECK_THRESHOLD; round++) {
             totalRechecks++;
             send({ stage: 'reviewer', status: 'progress', completed: reviewDone, total: chunks.length, index: i, categories: reviews[i].categories, pitfalls: reviews[i].pitfalls, issues: reviews[i].issues, score: reviews[i].score, certifiable: reviews[i].certifiable, recheck: true, round });
-            reviews[i] = await reviewerAgent(apiKey, chunks[i], reviews[i].revised);
+            reviews[i] = await reviewerAgent(key, chunks[i], reviews[i].revised);
             send({ stage: 'reviewer', status: 'progress', completed: reviewDone, total: chunks.length, index: i, categories: reviews[i].categories, pitfalls: reviews[i].pitfalls, issues: reviews[i].issues, score: reviews[i].score, certifiable: reviews[i].certifiable, recheck: true, round });
           }
 
@@ -877,7 +878,7 @@ export async function POST(req: NextRequest) {
 
           // ── Style Review (Pass 2 — Sonnet) ──
           if (!styleReviewerStarted) { styleReviewerStarted = true; send({ stage: 'style-reviewer', status: 'running' }); }
-          styleReviews[i] = await styleReviewerAgent(apiKey, reviews[i].revised);
+          styleReviews[i] = await styleReviewerAgent(key, reviews[i].revised);
           styleReviewDone++;
           send({ stage: 'style-reviewer', status: 'progress', completed: styleReviewDone, total: chunks.length, index: i, style_score: styleReviews[i].style_score, style_issues: styleReviews[i].style_issues });
           if (styleReviewDone === chunks.length && !styleReviewerFinished) {
@@ -888,7 +889,7 @@ export async function POST(req: NextRequest) {
 
           // ── Smooth (always run on every chunk, with diff-check) ──
           if (!smootherStarted) { smootherStarted = true; send({ stage: 'smoother', status: 'running' }); }
-          const smoothResult = await smootherAgent(apiKey, styleReviews[i].revised);
+          const smoothResult = await smootherAgent(key, styleReviews[i].revised);
           smoothedChunks[i] = postProcess(enforceTerminology(smoothResult.text));
           if (smoothResult.flagged) smootherFlagged++;
           smoothDone++;
@@ -930,7 +931,7 @@ export async function POST(req: NextRequest) {
         if (chunks.length > 1) {
           send({ stage: 'consistency', status: 'running' });
           try {
-            const consistency = await crossChunkConsistencyCheck(apiKey, smoothedChunks);
+            const consistency = await crossChunkConsistencyCheck(key, smoothedChunks);
             if (consistency.inconsistencies.length > 0) {
               send({ stage: 'consistency', status: 'progress', inconsistencies: consistency.inconsistencies });
               // Apply corrections to affected chunks
@@ -948,7 +949,7 @@ export async function POST(req: NextRequest) {
         // ── Stage 5: Assembler (Sonnet) ─────────────────────────────────
         const avgScore = chunks.length > 0 ? reviews.reduce((s, r) => s + r.score, 0) / chunks.length : 0;
         send({ stage: 'assembler', status: 'running' });
-        const assembled = postProcess(await assemblerAgent(apiKey, smoothedChunks));
+        const assembled = postProcess(await assemblerAgent(key, smoothedChunks));
         const finalWords = assembled.trim().split(/\s+/).filter(Boolean).length;
         send({ stage: 'assembler', status: 'done', output: assembled, wordCount: finalWords, avgScore: Math.round(avgScore) });
 

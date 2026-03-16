@@ -757,9 +757,7 @@ export default function Home() {
           if (ev.status === 'running') {
             updateStage('assembler', { status: 'running', msg: 'Joining chunks into a single document…' });
           } else if (ev.status === 'done') {
-            const wCount = ev.wordCount as number, avg = ev.avgScore as number;
-            updateStage('assembler', { status: 'done', msg: `Document assembled — ${wCount.toLocaleString()} words · avg score ${avg}%` });
-            // Note: final output now comes from the enforcer stage, not here
+            updateStage('assembler', { status: 'done', msg: 'Document assembled' });
           }
         }
 

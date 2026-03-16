@@ -95,88 +95,6 @@ async function parallelBatch<T>(
   }
 }
 
-// ─── Deterministic Post-Processors ────────────────────────────────────────────
-
-/** Replace forbidden terminology with BAPS-mandated terms */
-function enforceTerminology(text: string): string {
-  let t = text;
-
-  // ── Highest-priority: saint(s)/monk(s) → Swami/Swamis (NEVER in BAPS context) ──
-  t = t.replace(/\bsaints\b/gi, (m: string) => m[0] === 'S' ? 'Swamis' : 'swamis');
-  t = t.replace(/\bsaint\b/gi, (m: string) => m[0] === 'S' ? 'Swami' : 'swami');
-  t = t.replace(/\bmonks\b/gi, (m: string) => m[0] === 'M' ? 'Swamis' : 'swamis');
-  t = t.replace(/\bmonk\b/gi, (m: string) => m[0] === 'M' ? 'Swami' : 'swami');
-
-  // ── temple(s) → mandir(s) ──
-  t = t.replace(/\btemples\b/gi, (m: string) => m[0] === 'T' ? 'Mandirs' : 'mandirs');
-  t = t.replace(/\btemple\b/gi, (m: string) => m[0] === 'T' ? 'Mandir' : 'mandir');
-
-  // ── haribhakta(s) / follower(s) → devotee(s) ──
-  t = t.replace(/\bharibhaktas\b/gi, 'devotees');
-  t = t.replace(/\bharibhakta\b/gi, 'devotee');
-  t = t.replace(/\bfollowers\b/gi, (m: string) => m[0] === 'F' ? 'Devotees' : 'devotees');
-  t = t.replace(/\bfollower\b/gi, (m: string) => m[0] === 'F' ? 'Devotee' : 'devotee');
-
-  // ── Core term replacements ──
-  t = t.replace(/\bpenance\b/gi, 'austerities');
-  t = t.replace(/\btorchbearer\b/gi, 'successor');
-  t = t.replace(/\baarti\b/gi, 'arti');
-  t = t.replace(/\bvicharan\b/gi, 'vichran');
-  t = t.replace(/\bdhotiyos\b/gi, 'dhotiyas');
-  t = t.replace(/\bBrahmic state\b/gi, 'brahmisthiti');
-  t = t.replace(/\bscriptures\b/gi, (m: string) => m[0] === 'S' ? 'Shastras' : 'shastras');
-  t = t.replace(/\bscripture\b/gi, (m: string) => m[0] === 'S' ? 'Shastra' : 'shastra');
-  t = t.replace(/\bcongregation\b/gi, 'satsang');
-
-  // ── "mythology" for Hindu texts → "sacred history" ──
-  t = t.replace(/\bHindu mythology\b/gi, 'Hindu sacred history');
-  t = t.replace(/\bmythology\b/gi, 'sacred history');
-
-  // ── Phrase replacements ──
-  t = t.replace(/\bLord Swaminarayan\b/g, 'Bhagwan Swaminarayan');
-  t = t.replace(/\bdivine abode\b/gi, 'Akshardham');
-  t = t.replace(/\bShrijimaharaj\b/g, 'Shriji Maharaj');
-  t = t.replace(/\bShri Ji Maharaj\b/g, 'Shriji Maharaj');
-
-  // ── Personal name corrections ──
-  t = t.replace(/\bBhilalbhai\b/g, 'Bhailalbhai');
-  t = t.replace(/\bNarayanda\b/g, 'Naran\u2019da');
-  t = t.replace(/\bNaranda\b/g, 'Naran\u2019da');
-
-  // ── Place name corrections (per Examples doc entries 69, 82-96) ──
-  t = t.replace(/\bPipalana\b/g, 'Piplana');
-  t = t.replace(/\bChanasad\b/g, 'Chansad');
-  t = t.replace(/\bBamangaon\b/g, 'Bamangam');
-  t = t.replace(/\bDholiya\b/g, 'Dhuliya');
-  t = t.replace(/\bDungara\b/g, 'Dangara');
-  t = t.replace(/\bBhadarod\b/g, 'Bhadrod');
-  t = t.replace(/\bChokshi\b/g, 'Choksi');
-
-  return t;
-}
-
-/** Fix curly quotes, en dashes, and strip forbidden diacritics */
-function postProcess(text: string): string {
-  let t = text;
-  // Straight double quotes → curly (paired)
-  let openDouble = true;
-  t = t.replace(/"/g, () => { const q = openDouble ? '\u201c' : '\u201d'; openDouble = !openDouble; return q; });
-  // Straight single quotes → curly (only when clearly paired, not apostrophes)
-  t = t.replace(/'([^']{2,})'/g, '\u2018$1\u2019');
-  // Em dashes → spaced en dashes
-  t = t.replace(/\u2014/g, ' \u2013 ');
-  t = t.replace(/ {2,}\u2013 {2,}/g, ' \u2013 '); // clean double spaces
-  // Strip forbidden diacritics (keep only ā)
-  const diacriticMap: Record<string, string> = {
-    '\u1e41': 'm', '\u1e6d': 't', '\u1e63': 'sh', '\u015b': 'sh', '\u1e47': 'n',
-    '\u012b': 'i', '\u016b': 'u', '\u1e5b': 'r', '\u1e45': 'n', '\u1e0d': 'd', '\u0127': 'h', '\u00f1': 'n',
-  };
-  for (const [from, to] of Object.entries(diacriticMap)) {
-    t = t.split(from).join(to);
-  }
-  return t;
-}
-
 // ─── Gold Standard Context ────────────────────────────────────────────────────
 
 const KEY_GLOSSARY = `
@@ -1140,7 +1058,7 @@ export async function POST(req: NextRequest) {
         async function processChunk(i: number) {
           // ── Translate (pipelined: starts reviewing as soon as translation is done) ──
           if (!translatorStarted) { translatorStarted = true; send({ stage: 'translator', status: 'running' }); }
-          translations[i] = enforceTerminology(await translatorAgent(key, chunks[i], i, chunks.length));
+          translations[i] = rulesEnforcerAgent(await translatorAgent(key, chunks[i], i, chunks.length)).text;
           translateDone++;
           send({ stage: 'translator', status: 'progress', current: translateDone, total: chunks.length, index: i, translation: translations[i] });
           if (translateDone === chunks.length && !translatorFinished) {
@@ -1171,7 +1089,9 @@ export async function POST(req: NextRequest) {
           // ── Smooth (run on reviewer output directly — style review folded into certification) ──
           if (!smootherStarted) { smootherStarted = true; send({ stage: 'smoother', status: 'running' }); }
           const smoothResult = await smootherAgent(key, reviews[i].revised);
-          smoothedChunks[i] = postProcess(enforceTerminology(smoothResult.text));
+          // Run rules enforcer on each chunk (terminology, punctuation, diacritics)
+          const chunkEnforced = rulesEnforcerAgent(smoothResult.text);
+          smoothedChunks[i] = chunkEnforced.text;
           if (smoothResult.flagged) smootherFlagged++;
           smoothDone++;
           send({ stage: 'smoother', status: 'progress', completed: smoothDone, total: chunks.length, index: i, flagged: smoothResult.flagged });

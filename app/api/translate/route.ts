@@ -14,9 +14,9 @@ const HAIKU  = 'claude-haiku-4-5-20251001';
 const BATCH  = 5;                // parallel chunk concurrency
 const SEQ_CHUNKS = 1;            // translate first N chunks sequentially for memory
 const RECHECK_THRESHOLD = 96;   // re-review chunks scoring below this on weighted rubric score
-const MAX_REVIEW_ROUNDS = 3;    // max iterative review rounds per chunk (raised from 2 for stubborn chunks)
-const API_TIMEOUT_MS    = 120_000; // 120s per Claude call
-const MAX_RETRIES       = 2;      // retries for transient errors
+const MAX_REVIEW_ROUNDS = 2;    // max iterative review rounds per chunk (keep at 2 for Vercel 300s limit)
+const API_TIMEOUT_MS    = 90_000;  // 90s per Claude call (tighter for Vercel)
+const MAX_RETRIES       = 1;      // single retry to stay within time budget
 
 // ─── Anthropic API helper (with timeout + retry) ────────────────────────────
 
@@ -346,17 +346,15 @@ function deterministicChunk(text: string): string[] {
 
 // ─── System Prompts ──────────────────────────────────────────────────────────
 
-const TRANSLATOR_SYSTEM = `You are a trustee of tradition (parampara) for Aksharpith, the publishing wing of BAPS Swaminarayan Sanstha. Your priority is FIDELITY OVER FLUENCY. You are a carrier of the original voice \u2014 not a commentator, not an editor.
+const TRANSLATOR_SYSTEM = `The provided documents establish a comprehensive editorial and translation framework for BAPS spiritual literature, emphasizing fidelity to the original Gujarati source and a reverent, dignified tone. The Aksharpith House-Style Guide mandates the use of British English, specific punctuation like curly quotation marks, and restricted use of diacritics to ensure clarity and professional consistency. Complementing these rules, the Master Learning & Corrections document provides over 200 specific examples to prevent the secularization of sacred history and the use of modern management jargon. A detailed Master Glossary further supports this by defining core theological terms like Akshar, Purushottam, and atma to maintain doctrinal precision. This collective system ensures that every publication remains an authentic carrier of the tradition\u2019s spiritual essence without unnecessary modernization or interpretation. Ultimately, the guides treat the translator as a trustee of the parampara, prioritizing historical accuracy and devotional sanctity over literary flourish.
 
-${HOUSE_RULES_CONTEXT}
+I want you to act as a trustee of tradition (parampara). Your priority is fidelity over fluency: treat the Gujarati source as historically and spiritually authoritative. You must first study and acknowledge these absolute rules from my uploaded sources: Mindset: You are a carrier of the original voice, not a commentator or an editor. Do not modernize, summarize, or simplify the text. Highest Priority Punctuation: Always use curly double speech marks (\u201c \u201d) for primary quotes and spaced en dashes ( \u2013 ) instead of em dashes. Language: Use British English (Oxford Style). Use \u2013ize endings (organize), \u2018colour,\u2019 and \u2018travelled\u2019. Doctrinal Vocabulary: Use Akshardham (not \u2018divine abode\u2019), Purush (not \u2018personage\u2019), and Shriji Maharaj (as two words). Historical Integrity: Use historically accurate names for the time period (e.g., Bombay Province, not Mumbai). Ensure exact village spellings: Chansad, Dhuliya, Bhadrod, Bamangam, Dangara.
 
 ${KEY_GLOSSARY}
 
-UNLISTED TERMS: If you encounter a Gujarati term not in the glossary, transliterate it without diacritics and keep it untranslated. Use context to make the meaning clear. Never invent an English gloss.
+Translate the following Gujarati text. Cross-reference every term with the Master Glossary to ensure correct context. Specific Constraints: Poetic Lines: Include the Roman transliteration first, followed by the meaning. Diacritics: Do not use macrons (\u012b, \u016b) in prose. Use \u0101 only when directly quoting poetic or canonical verses. Tone: Maintain a dignified, measured, and reverent register. Eliminate rhetorical padding like \u2018indeed\u2019 or \u2018truly\u2019. Speaker Authority: Keep quotes in the first person; do not soften them into indirect speech.
 
-ALREADY-ENGLISH TEXT: If a passage in the source is already in English, reproduce it exactly.
-
-MINDSET: Every sentence carries devotional, historical, and doctrinal weight. Preserve it completely. Provide ONLY the English translation \u2014 no preamble, no notes, no commentary.`;
+Provide ONLY the English translation \u2014 no preamble, no notes, no commentary.`;
 
 const REVIEWER_SYSTEM = `You are a BAPS translation auditor and senior style reviewer for Aksharpith. You are reviewing text produced by ANOTHER translator \u2014 you did NOT write this text. Perform a combined certification and style audit in a single pass.
 
@@ -437,32 +435,25 @@ Produce a revised translation fixing ALL style issues while preserving meaning e
 Return ONLY valid JSON (no fences):
 {"style_issues": ["issue1", ...], "style_score": <0-100>, "revised": "..."}`;
 
-const SMOOTHER_SYSTEM = `You are a senior editorial reader for Aksharpith performing a final readability pass. The text you receive has already been certified by a BAPS auditor \u2014 all terminology, punctuation, and diacritics are correct. Your job is ONLY to improve prose flow.
-
-IMPROVE:
-- Smooth awkward phrasing and unnatural flow in narrative prose
-- Restructure overly long or heavily nested sentences
-- Add natural transitions where the English feels abrupt
-- Remove repetitive sentence openings
-
-NEVER CHANGE:
-- Direct quotes from any named figure, scholar, or Swami \u2014 WORD FOR WORD
-- Transliterated verses and their translations \u2014 reproduce in full
-- All proper nouns, Sanskrit/Gujarati terms, place names, personal names
-- All dates, numbers, time stamps
-- Curly quotes (\u201c \u201d), spaced en dashes ( \u2013 ), and all punctuation formatting
+const SMOOTHER_SYSTEM = `I am working on improving a translation of a non-fiction historical biography for better readability. Please revise each passage I share according to the following rules:
+What to improve:
+- Smooth out awkward phrasing and unnatural flow in the narrative prose
+- Restructure overly long or heavily nested sentences where needed
+- Use natural transitions and connective language
+What to never change:
+- Direct quotes from named historical figures, scholars, and writers \u2014 leave these word for word
+- Transliterated verses and their translations \u2014 reproduce these in full, never truncate with ellipsis
+- All proper nouns, Sanskrit/Gujarati terms, and names
 - These BAPS terms (never replace with English equivalents): ${PROTECTED_TERMS}
-- Any phrasing that appears deliberately structured for doctrinal precision, even if slightly awkward in English
-
-If the input is entirely verse/poetry with no narrative prose, return it unchanged.
-
-CRITICAL RULE: If in doubt about whether a change preserves meaning, DO NOT make the change. Err on the side of preserving the certified text. Minimal, targeted improvements only.
-
-STYLE: En dash ( \u2013 ) throughout | British English, Oxford -ize | Curly quotes | Reverent tone
+Formatting and style:
+- Use en-dash ( \u2013 ) throughout; never em-dash ( \u2014 )
+- Commas and semi-colons may be used where appropriate
+- British English with Oxford -ize spellings (e.g. recognize, organize, realize)
+- Italicise transliterated verses and book titles
 
 Return ONLY the revised text \u2014 no preamble, no notes.`;
 
-const ASSEMBLER_SYSTEM = `You are a senior editor assembling a multi-chunk translation into a single publication-ready document.
+const ASSEMBLER_SYSTEM = `You are a trustee of tradition (parampara) assembling a multi-chunk translation into a single publication-ready document. Your priority is fidelity: the translated chunks have already been certified against the Aksharpith House-Style Guide.
 
 STRUCTURAL OPERATIONS ONLY:
 - Remove all chunk markers, separators, and numbering
@@ -476,6 +467,12 @@ DO NOT:
 - Change terminology, spelling, or punctuation
 - Remove or reorder any paragraphs
 - Replace these terms: ${PROTECTED_TERMS}
+
+Formatting:
+- Use en-dash ( \u2013 ) throughout; never em-dash ( \u2014 )
+- Curly double speech marks (\u201c \u201d) for all quotations
+- British English with Oxford -ize spellings
+- Italicise transliterated verses and book titles
 
 Output ONLY the final document \u2014 no preamble or notes.`;
 
@@ -827,12 +824,9 @@ export async function POST(req: NextRequest) {
         // Stage completion tracking
         let translateDone = 0, reviewDone = 0, smoothDone = 0;
         let translatorStarted = false, reviewerStarted = false, smootherStarted = false;
-        let styleReviewerStarted = false, styleReviewerFinished = false;
         let translatorFinished = false, reviewerFinished = false, smootherFinished = false;
         let totalRechecks = 0;
         let smootherFlagged = 0;
-        const styleReviews: StyleReviewResult[] = new Array(chunks.length);
-        let styleReviewDone = 0;
 
         async function processChunk(i: number) {
           // ── Translate ──
@@ -876,20 +870,9 @@ export async function POST(req: NextRequest) {
             send({ stage: 'reviewer', status: 'done', certCount, total: chunks.length, avgScore, rechecked: totalRechecks });
           }
 
-          // ── Style Review (Pass 2 — Sonnet) ──
-          if (!styleReviewerStarted) { styleReviewerStarted = true; send({ stage: 'style-reviewer', status: 'running' }); }
-          styleReviews[i] = await styleReviewerAgent(key, reviews[i].revised);
-          styleReviewDone++;
-          send({ stage: 'style-reviewer', status: 'progress', completed: styleReviewDone, total: chunks.length, index: i, style_score: styleReviews[i].style_score, style_issues: styleReviews[i].style_issues });
-          if (styleReviewDone === chunks.length && !styleReviewerFinished) {
-            styleReviewerFinished = true;
-            const avgStyleScore = chunks.length > 0 ? styleReviews.reduce((s, r) => s + r.style_score, 0) / chunks.length : 0;
-            send({ stage: 'style-reviewer', status: 'done', avgStyleScore: Math.round(avgStyleScore) });
-          }
-
-          // ── Smooth (always run on every chunk, with diff-check) ──
+          // ── Smooth (run on reviewer output directly — style review folded into certification) ──
           if (!smootherStarted) { smootherStarted = true; send({ stage: 'smoother', status: 'running' }); }
-          const smoothResult = await smootherAgent(key, styleReviews[i].revised);
+          const smoothResult = await smootherAgent(key, reviews[i].revised);
           smoothedChunks[i] = postProcess(enforceTerminology(smoothResult.text));
           if (smoothResult.flagged) smootherFlagged++;
           smoothDone++;
@@ -917,34 +900,13 @@ export async function POST(req: NextRequest) {
           const avgScore = chunks.length > 0 ? reviews.reduce((s, r) => s + r.score, 0) / chunks.length : 0;
           send({ stage: 'reviewer', status: 'done', certCount, total: chunks.length, avgScore, rechecked: totalRechecks });
         }
-        if (!styleReviewerFinished) {
-          styleReviewerFinished = true;
-          const avgStyleScore = chunks.length > 0 ? styleReviews.reduce((s, r) => s + r.style_score, 0) / chunks.length : 0;
-          send({ stage: 'style-reviewer', status: 'done', avgStyleScore: Math.round(avgStyleScore) });
-        }
         if (!smootherFinished) {
           smootherFinished = true;
           send({ stage: 'smoother', status: 'done', flaggedChunks: smootherFlagged });
         }
 
-        // ── Cross-chunk consistency check (Change 4) ──────────────────────
-        if (chunks.length > 1) {
-          send({ stage: 'consistency', status: 'running' });
-          try {
-            const consistency = await crossChunkConsistencyCheck(key, smoothedChunks);
-            if (consistency.inconsistencies.length > 0) {
-              send({ stage: 'consistency', status: 'progress', inconsistencies: consistency.inconsistencies });
-              // Apply corrections to affected chunks
-              consistency.corrections.forEach((corrected, idx) => {
-                smoothedChunks[idx] = corrected;
-              });
-            }
-            send({ stage: 'consistency', status: 'done', issuesFound: consistency.inconsistencies.length, chunksFixed: consistency.corrections.size });
-          } catch (err) {
-            console.error('Consistency check failed:', err instanceof Error ? err.message : err);
-            send({ stage: 'consistency', status: 'done', issuesFound: 0, chunksFixed: 0, warning: 'Consistency check failed, proceeding without it' });
-          }
-        }
+        // Cross-chunk consistency is now handled by deterministic enforceTerminology() + postProcess()
+        // Skipping LLM-based consistency check to stay within Vercel 300s timeout
 
         // ── Stage 5: Assembler (Sonnet) ─────────────────────────────────
         const avgScore = chunks.length > 0 ? reviews.reduce((s, r) => s + r.score, 0) / chunks.length : 0;

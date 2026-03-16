@@ -11,9 +11,13 @@ type Tab = 'input' | 'pipeline' | 'output';
 type InputMode = 'paste' | 'upload';
 
 interface StageState {
-  id: 'chunker' | 'translator' | 'reviewer' | 'smoother' | 'assembler';
+  id: 'chunker' | 'translator' | 'reviewer' | 'smoother' | 'assembler' | 'enforcer';
   num: string; label: string; tagline: string;
   status: StageStatus; msg: string; progress: number | null;
+}
+
+interface EnforcerCorrection {
+  from: string; to: string; count: number;
 }
 
 interface Reviewer1Category { id: string; name?: string; weight?: number; score?: number; pass: boolean; issues?: string[]; deductions?: string[]; }
@@ -38,10 +42,11 @@ interface ChapterResult {
 
 const INITIAL_STAGES: StageState[] = [
   { id: 'chunker',    num: '01', label: 'Chunker',    tagline: 'Splits text at paragraph and verse boundaries into \u2264500-word segments', status: 'waiting', msg: '', progress: null },
-  { id: 'translator', num: '02', label: 'Translator', tagline: 'Gold Standard Prompts 1\u20133 \u2014 trustee of tradition, glossary cross-reference, fidelity over fluency', status: 'waiting', msg: '', progress: null },
-  { id: 'reviewer',   num: '03', label: 'Reviewer',   tagline: 'Weighted 97% rubric \u2014 Fidelity 30, Terminology 25, Verse 15, Style 15, Historical 10, Completeness 5', status: 'waiting', msg: '', progress: null },
-  { id: 'smoother',   num: '04', label: 'Smoother',   tagline: 'Gold Standard Prompt 4 \u2014 readability pass with en dashes, British English, italicised verses', status: 'waiting', msg: '', progress: null },
-  { id: 'assembler',  num: '05', label: 'Assembler',  tagline: 'Structural join \u2014 trustee of tradition, no rewrites', status: 'waiting', msg: '', progress: null },
+  { id: 'translator', num: '02', label: 'Translator', tagline: 'Gujarati\u2192English with full Aksharpith style context (Opus)', status: 'waiting', msg: '', progress: null },
+  { id: 'reviewer',   num: '03', label: 'Reviewer',   tagline: '6-category weighted rubric \u2014 fidelity, terminology, verse, style, history, completeness', status: 'waiting', msg: '', progress: null },
+  { id: 'smoother',   num: '04', label: 'Smoother',   tagline: 'Readability pass \u2014 preserves all BAPS terminology and direct quotes', status: 'waiting', msg: '', progress: null },
+  { id: 'assembler',  num: '05', label: 'Assembler',  tagline: 'Structural join only \u2014 deduplicates boundaries, no rewrites', status: 'waiting', msg: '', progress: null },
+  { id: 'enforcer',   num: '06', label: 'Rules Enforcer', tagline: 'Deterministic rules check \u2014 terminology, punctuation, diacritics, place names', status: 'waiting', msg: '', progress: null },
 ];
 
 const SAMPLE = `પ્રેમે પ્રગટ્યા રે સૂરજ સહજાનંદ, અધર્મ અંધારું ટાળિયું...
@@ -76,8 +81,8 @@ function badgeStyle(type: 'strong' | 'adequate' | 'weak' | 'running'): React.CSS
 }
 
 function scoreTier(score: number): { label: string; type: 'strong' | 'adequate' | 'weak'; desc: string } {
-  if (score >= 90) return { label: 'Publication Ready', type: 'strong',   desc: 'Meets all Aksharpith publication standards.' };
-  if (score >= 80) return { label: 'Strong',            type: 'strong',   desc: 'Minor issues corrected — ready for editorial sign-off.' };
+  if (score >= 90) return { label: 'Publication Ready', type: 'strong',   desc: 'Appears to meet Aksharpith publication standards \u2014 verify with editorial.' };
+  if (score >= 80) return { label: 'Strong',            type: 'strong',   desc: 'Minor issues corrected \u2014 recommended for editorial review.' };
   if (score >= 70) return { label: 'Revised',           type: 'adequate', desc: 'Multiple corrections applied by both reviewers.' };
   if (score >= 60) return { label: 'Needs Work',        type: 'adequate', desc: 'Significant revision was required — verify manually.' };
   return              { label: 'Poor',             type: 'weak',     desc: 'Major issues found — consider retranslating this chunk.' };
@@ -295,7 +300,7 @@ function FileUpload({ onExtracted, disabled, getToken }: { onExtracted: (text: s
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <span className="spinning" style={{ color: 'var(--amber)' }}>◌</span>
                 <div>
-                  <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-muted)' }}>Processing with Claude…</div>
+                  <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-muted)' }}>Extracting text from document…</div>
                   <div style={{ fontSize: 11, fontWeight: 300, color: 'var(--text-light)', marginTop: 2 }}>Extracting text, preserving Gujarati Unicode and structure</div>
                 </div>
               </div>
@@ -569,6 +574,8 @@ export default function Home() {
   const [isRunning, setIsRunning] = useState(false);
   const [pipelineError, setPipelineError] = useState<string | null>(null);
   const [copied, setCopied]       = useState(false);
+  const [enforcerCorrections, setEnforcerCorrections] = useState<EnforcerCorrection[]>([]);
+  const [rulesExpanded, setRulesExpanded] = useState(false);
 
   // Book mode
   const [isBookMode, setIsBookMode]     = useState(false);
@@ -653,10 +660,10 @@ export default function Home() {
         // ── Translator ────────────────────────────────────────────────
         if (ev.stage === 'translator') {
           if (ev.status === 'running') {
-            updateStage('translator', { status: 'running', msg: 'Applying gold standard glossary and house rules…', progress: 0 });
+            updateStage('translator', { status: 'running', msg: 'Applying Aksharpith glossary and house rules…', progress: 0 });
           } else if (ev.status === 'progress') {
             const cur = ev.current as number, tot = ev.total as number;
-            updateStage('translator', { status: 'running', msg: `Translating chunk ${cur} of ${tot} — trustee-of-tradition mindset…`, progress: Math.round((cur - 1) / tot * 100) });
+            updateStage('translator', { status: 'running', msg: `Translating chunk ${cur} of ${tot}…`, progress: Math.round((cur - 1) / tot * 100) });
             const idx = ev.index as number;
             chunkMap.current[idx] = { ...chunkMap.current[idx], translation: ev.translation as string };
             setChunks(Object.values(chunkMap.current).sort((a, b) => a.index - b.index));
@@ -668,7 +675,7 @@ export default function Home() {
         // ── Reviewer (combined cert + style) — parallel ─────────────
         if (ev.stage === 'reviewer') {
           if (ev.status === 'running') {
-            updateStage('reviewer', { status: 'running', msg: 'Running weighted 97% rubric audit (parallel)\u2026', progress: 0 });
+            updateStage('reviewer', { status: 'running', msg: 'Running Aksharpith certification audit\u2026', progress: 0 });
           } else if (ev.status === 'rechecking') {
             const n = ev.count as number, round = ev.round as number;
             const lowIndices = Object.values(chunkMap.current)
@@ -748,10 +755,24 @@ export default function Home() {
         // ── Assembler ─────────────────────────────────────────────────
         if (ev.stage === 'assembler') {
           if (ev.status === 'running') {
-            updateStage('assembler', { status: 'running', msg: 'Assembling all chunks into a single publication-ready document…' });
+            updateStage('assembler', { status: 'running', msg: 'Joining chunks into a single document…' });
           } else if (ev.status === 'done') {
             const wCount = ev.wordCount as number, avg = ev.avgScore as number;
             updateStage('assembler', { status: 'done', msg: `Document assembled — ${wCount.toLocaleString()} words · avg score ${avg}%` });
+            // Note: final output now comes from the enforcer stage, not here
+          }
+        }
+
+        // ── Rules Enforcer ────────────────────────────────────────────
+        if (ev.stage === 'enforcer') {
+          if (ev.status === 'running') {
+            updateStage('enforcer', { status: 'running', msg: 'Applying Aksharpith house rules\u2026' });
+          } else if (ev.status === 'done') {
+            const totalFixes = (ev.totalFixes as number) ?? 0;
+            const corrections = (ev.corrections as EnforcerCorrection[]) ?? [];
+            const wCount = ev.wordCount as number, avg = ev.avgScore as number;
+            updateStage('enforcer', { status: 'done', msg: `Rules enforced \u2014 ${totalFixes} correction${totalFixes !== 1 ? 's' : ''} applied` });
+            setEnforcerCorrections(corrections);
             result = { output: ev.output as string, avg, wordCount: wCount };
           }
         }
@@ -777,6 +798,8 @@ export default function Home() {
 
     setPipelineError(null);
     setOutput('');
+    setEnforcerCorrections([]);
+    setRulesExpanded(false);
     setIsRunning(true);
     setTab('pipeline');
     abortRef.current = new AbortController();
@@ -900,12 +923,12 @@ export default function Home() {
           <img src="/baps-logo.png" alt="BAPS" style={{ height: 44, width: 'auto', opacity: 0.85 }} />
           <div>
             <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: 3, textTransform: 'uppercase', color: 'var(--text-light)', marginBottom: 2 }}>
-              BAPS Swaminarayan \u00b7 Aksharpith
+              Aksharpith
             </div>
             <div style={{ fontFamily: '"Cormorant Garamond", serif', fontWeight: 300, fontSize: 26, color: 'var(--text)', letterSpacing: '-0.3px' }}>
               Translation <em>Pipeline</em>
               <span style={{ fontFamily: "'Karla', sans-serif", fontSize: 10, fontWeight: 600, letterSpacing: 1, color: 'var(--text-light)', marginLeft: 12, verticalAlign: 'middle' }}>
-                5 AGENTS \u00b7 GOLD STANDARD
+                6-STAGE
               </span>
             </div>
           </div>
@@ -1000,7 +1023,7 @@ export default function Home() {
                 />
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8 }}>
                   <button onClick={() => setInputText(SAMPLE)} style={{ fontSize: 11, fontWeight: 500, color: 'var(--text-light)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
-                    Load sample →
+                    Load sample text
                   </button>
                   <div style={{ fontSize: 11, fontWeight: 400, color: words > MAX_WORDS ? 'var(--red)' : 'var(--text-light)' }}>
                     {words.toLocaleString()} / {MAX_WORDS.toLocaleString()} words{words > MAX_WORDS ? ' — too long' : words > WARN_WORDS ? ' — use book mode' : ''}
@@ -1018,7 +1041,7 @@ export default function Home() {
                 <span style={badgeStyle('strong')}>{bookChapters.length} sections</span>
               </div>
               <div style={{ fontSize: 12, fontWeight: 300, color: 'var(--text-muted)', lineHeight: 1.6 }}>
-                Each section will be processed as a separate 6-agent pipeline run. Translation memory is maintained across sections.
+                Each section will be processed through the full 6-stage pipeline. Translation memory is maintained across sections.
               </div>
               <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 4 }}>
                 {bookChapters.slice(0, 8).map((ch, i) => (
@@ -1035,16 +1058,16 @@ export default function Home() {
             </div>
           )}
 
-          {/* Gold Standard context active */}
+          {/* Aksharpith reference context */}
           <div style={{ background: 'var(--bg-warm)', borderLeft: '2px solid var(--text-light)', borderRadius: '0 var(--radius) var(--radius) 0', padding: '20px 24px' }}>
-            <div style={{ ...labelStyle, marginBottom: 10 }}>Gold Standard Context Active</div>
+            <div style={{ ...labelStyle, marginBottom: 10 }}>Reference Context Loaded</div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
               {[
                 'Aksharpith House Rules (full)',
-                'Master Glossary (200+ terms)',
+                'Aksharpith Master Glossary',
                 'BAPS Certification Checklist',
                 'BAPS Common Pitfalls (20 items)',
-                '79+ before/after corrections',
+                'Documented corrections archive',
                 'Cross-chunk translation memory',
               ].map(rule => (
                 <div key={rule} style={{ fontSize: 13, fontWeight: 300, color: 'var(--text-muted)', display: 'flex', gap: 8, alignItems: 'flex-start' }}>
@@ -1071,8 +1094,8 @@ export default function Home() {
             }}
           >
             {isRunning
-              ? `${isBookMode ? `Processing section ${currentChapterIdx + 1} of ${bookChapters.length}` : 'Pipeline running'}… (click to stop)`
-              : `Run ${isBookMode ? 'Book' : ''} Translation Pipeline →`}
+              ? `${isBookMode ? `Processing section ${currentChapterIdx + 1} of ${bookChapters.length}` : 'Translation in progress'}\u2026 (click to stop)`
+              : `Begin ${isBookMode ? 'Book ' : ''}Pipeline`}
           </button>
         </div>
       )}
@@ -1106,7 +1129,7 @@ export default function Home() {
 
               {/* Score legend */}
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 16px', marginBottom: 16, padding: '10px 14px', background: 'var(--bg-warm)', borderRadius: 6, border: '1px solid var(--border)' }}>
-                <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: 1.5, textTransform: 'uppercase', color: 'var(--text-light)', width: '100%', marginBottom: 4 }}>Score Guide — Reviewer 2</span>
+                <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: 1.5, textTransform: 'uppercase', color: 'var(--text-light)', width: '100%', marginBottom: 4 }}>Score Guide</span>
                 {[
                   { label: '90–100%', name: 'Publication Ready', type: 'strong' as const },
                   { label: '80–89%',  name: 'Strong',            type: 'strong' as const },
@@ -1140,10 +1163,10 @@ export default function Home() {
           {!output ? (
             <div style={{ textAlign: 'center', padding: '48px 20px' }}>
               <div style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 24, fontWeight: 300, fontStyle: 'italic', marginBottom: 8, color: 'var(--text-muted)' }}>
-                {isRunning ? <span className="spinning">◌</span> : 'No translation yet'}
+                {isRunning ? <span className="spinning">\u25CC</span> : 'No output yet'}
               </div>
               <p style={{ fontSize: 13, fontWeight: 300, color: 'var(--text-light)' }}>
-                {isRunning ? 'Processing your text…' : 'Run the pipeline to see output here'}
+                {isRunning ? 'Processing\u2026' : 'Start the pipeline to see output here'}
               </p>
             </div>
           ) : (
@@ -1158,9 +1181,37 @@ export default function Home() {
               <div style={{ background: 'var(--bg-white)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: 24, fontFamily: '"Cormorant Garamond", serif', fontSize: 17, fontWeight: 400, lineHeight: 1.9, color: 'var(--text-body)', whiteSpace: 'pre-wrap' }} className="fadein">
                 {output}
               </div>
+              {enforcerCorrections.length > 0 && (
+                <div style={{ background: 'var(--bg-warm)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', overflow: 'hidden' }} className="fadein">
+                  <button
+                    onClick={() => setRulesExpanded(prev => !prev)}
+                    style={{
+                      width: '100%', padding: '12px 18px', background: 'none', border: 'none', cursor: 'pointer',
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                      fontFamily: "'Karla', sans-serif", fontSize: 11, fontWeight: 600,
+                      letterSpacing: '1px', textTransform: 'uppercase', color: 'var(--text-muted)',
+                    }}
+                  >
+                    <span>Rules Applied ({enforcerCorrections.reduce((s, c) => s + c.count, 0)} corrections)</span>
+                    <span style={{ fontSize: 11, color: 'var(--text-light)' }}>{rulesExpanded ? '\u25B2' : '\u25BC'}</span>
+                  </button>
+                  {rulesExpanded && (
+                    <div style={{ padding: '0 18px 14px', display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      {enforcerCorrections.map((c, i) => (
+                        <div key={i} style={{ fontSize: 13, fontWeight: 300, color: 'var(--text-muted)', lineHeight: 1.6 }}>
+                          <span style={{ color: 'var(--red)', textDecoration: 'line-through' }}>{c.from}</span>
+                          {' \u2192 '}
+                          <span style={{ color: 'var(--green)', fontWeight: 500 }}>{c.to}</span>
+                          <span style={{ color: 'var(--text-light)', fontSize: 11, marginLeft: 6 }}>({c.count} occurrence{c.count !== 1 ? 's' : ''})</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
               <div style={{ display: 'flex', gap: 10 }}>
                 <button onClick={handleCopy} style={{ flex: 1, padding: '14px 24px', border: '1px solid var(--border)', borderRadius: 'var(--radius)', background: 'var(--bg-white)', color: 'var(--text-muted)', fontFamily: "'Karla', sans-serif", fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase', cursor: 'pointer', transition: 'all 0.2s' }}>
-                  {copied ? 'Copied ✓' : 'Copy Full Translation'}
+                  {copied ? 'Copied \u2713' : 'Copy Translation'}
                 </button>
                 <button onClick={handleDownload} style={{ padding: '14px 20px', border: '1px solid var(--border)', borderRadius: 'var(--radius)', background: 'var(--bg-white)', color: 'var(--text-muted)', fontFamily: "'Karla', sans-serif", fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase', cursor: 'pointer', transition: 'all 0.2s' }}>
                   Download .txt

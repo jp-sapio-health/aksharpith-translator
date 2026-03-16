@@ -1,0 +1,9 @@
+{
+  "functions": {
+    "source": "functions",
+    "predeploy": [
+      "npm --prefix functions run prebuild",
+      "npm --prefix functions run build"
+    ]
+  }
+}

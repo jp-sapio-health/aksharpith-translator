@@ -1,0 +1,22 @@
+{
+  "name": "aksharpith-functions",
+  "version": "1.0.0",
+  "private": true,
+  "main": "dist/index.js",
+  "scripts": {
+    "prebuild": "node -e \"const fs=require('fs');const cp=(s,d)=>{fs.mkdirSync(require('path').dirname(d),{recursive:true});if(fs.statSync(s).isDirectory()){fs.readdirSync(s).forEach(f=>cp(s+'/'+f,d+'/'+f))}else{fs.copyFileSync(s,d)}};cp('../lib/pipeline.ts','src/pipeline.ts');cp('../lib/job-types.ts','src/job-types.ts');cp('../lib/rules','src/rules');console.log('Copied lib/ into functions/src/')\"",
+    "build": "tsc",
+    "serve": "npm run build && firebase emulators:start --only functions",
+    "deploy": "npm run build && firebase deploy --only functions"
+  },
+  "engines": {
+    "node": "22"
+  },
+  "dependencies": {
+    "firebase-admin": "^13.7.0",
+    "firebase-functions": "^6.3.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

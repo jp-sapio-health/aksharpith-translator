@@ -1,11 +1,13 @@
 import { NextRequest } from 'next/server';
-import { after } from 'next/server';
 import { verifyAuthToken } from '../../../lib/verify-auth';
 import { adminDb } from '../../../lib/firebase-admin';
-import { runPipeline } from '../../../lib/pipeline';
-import type { JobDocument, JobProgressUpdate } from '../../../lib/job-types';
+import type { JobDocument } from '../../../lib/job-types';
 
 export const dynamic = 'force-dynamic';
+
+// POST creates a job document in Firestore. The Firebase Cloud Function
+// (functions/src/index.ts) triggers on document creation and runs the pipeline.
+// The client polls GET /api/translate/[jobId] for progress.
 
 export async function POST(req: NextRequest) {
   const authUser = await verifyAuthToken(req);
@@ -35,11 +37,7 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: `Section too long (${wordCount.toLocaleString()} words). Maximum is 50,000.` }, { status: 400 });
   }
 
-  if (!process.env.ANTHROPIC_API_KEY?.trim()) {
-    return Response.json({ error: 'ANTHROPIC_API_KEY not set' }, { status: 500 });
-  }
-
-  // Create job document in Firestore
+  // Create job document — Firebase Cloud Function triggers automatically
   const jobData: JobDocument = {
     status: 'pending',
     uid: authUser.uid,
@@ -54,51 +52,6 @@ export async function POST(req: NextRequest) {
   };
 
   const jobRef = await adminDb.collection('jobs').add(jobData);
-  const jobId = jobRef.id;
 
-  // Progress reporter: writes updates to Firestore job doc
-  const reportProgress = async (update: JobProgressUpdate) => {
-    const firestoreUpdate: Record<string, unknown> = {};
-    if (update.status) firestoreUpdate.status = update.status;
-    if (update.startedAt) firestoreUpdate.startedAt = update.startedAt;
-    if (update.completedAt) firestoreUpdate.completedAt = update.completedAt;
-    if (update.error) firestoreUpdate.error = update.error;
-    if (update.result) firestoreUpdate.result = update.result;
-    if (update.progress) {
-      // Merge progress fields using dot notation to avoid overwriting
-      if (update.progress.currentStage) firestoreUpdate['progress.currentStage'] = update.progress.currentStage;
-      if (update.progress.chunks) firestoreUpdate['progress.chunks'] = update.progress.chunks;
-      if (update.progress.stages) {
-        for (const [stage, data] of Object.entries(update.progress.stages)) {
-          for (const [key, val] of Object.entries(data as unknown as Record<string, unknown>)) {
-            firestoreUpdate[`progress.stages.${stage}.${key}`] = val;
-          }
-        }
-      }
-    }
-    await adminDb.collection('jobs').doc(jobId).update(firestoreUpdate);
-  };
-
-  // Run pipeline in background (after response is sent)
-  after(async () => {
-    try {
-      await runPipeline(
-        { text, wordCount, chapterTitle, bookId, bookTitle, chapterIndex, totalChapters },
-        { uid: authUser.uid, email: authUser.email ?? '' },
-        reportProgress,
-        adminDb,
-      );
-    } catch (err) {
-      console.error('Pipeline error:', err);
-      try {
-        await adminDb.collection('jobs').doc(jobId).update({
-          status: 'failed',
-          error: err instanceof Error ? err.message : 'Unknown error',
-          completedAt: new Date().toISOString(),
-        });
-      } catch { /* ignore Firestore write failure */ }
-    }
-  });
-
-  return Response.json({ jobId });
+  return Response.json({ jobId: jobRef.id });
 }

@@ -63,7 +63,7 @@ export const processTranslation = onDocumentCreated(
         if (update.progress.chunks) firestoreUpdate['progress.chunks'] = update.progress.chunks;
         if (update.progress.stages) {
           for (const [stage, stageData] of Object.entries(update.progress.stages)) {
-            for (const [key, val] of Object.entries(stageData as Record<string, unknown>)) {
+            for (const [key, val] of Object.entries(stageData as unknown as Record<string, unknown>)) {
               firestoreUpdate[`progress.stages.${stage}.${key}`] = val;
             }
           }

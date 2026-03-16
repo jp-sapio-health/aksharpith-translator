@@ -8,6 +8,7 @@
     "start": "next start"
   },
   "dependencies": {
+    "@vercel/functions": "^3.4.3",
     "docx": "^9.6.1",
     "firebase": "^12.10.0",
     "firebase-admin": "^13.7.0",

@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server';
-import { after } from 'next/server';
+import { waitUntil } from '@vercel/functions';
 import { verifyAuthToken } from '../../../lib/verify-auth';
 import { adminDb } from '../../../lib/firebase-admin';
 import { runPipeline } from '../../../lib/pipeline';
@@ -7,10 +7,6 @@ import type { JobDocument, JobProgressUpdate } from '../../../lib/job-types';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
-
-// POST creates a job document in Firestore, then:
-//   - If FIREBASE_FUNCTIONS=true: Cloud Function picks it up via onCreate trigger
-//   - Otherwise (default): runs pipeline inline via next/server after()
 
 export async function POST(req: NextRequest) {
   const authUser = await verifyAuthToken(req);
@@ -61,8 +57,7 @@ export async function POST(req: NextRequest) {
   const jobRef = await adminDb.collection('jobs').add(jobData);
   const jobId = jobRef.id;
 
-  // If Firebase Cloud Functions are handling processing, just return the jobId.
-  // Otherwise, run the pipeline inline as a fallback.
+  // Run pipeline in background — waitUntil keeps the function alive after response
   if (process.env.FIREBASE_FUNCTIONS !== 'true') {
     const reportProgress = async (update: JobProgressUpdate) => {
       const firestoreUpdate: Record<string, unknown> = {};
@@ -85,15 +80,13 @@ export async function POST(req: NextRequest) {
       await adminDb.collection('jobs').doc(jobId).update(firestoreUpdate);
     };
 
-    after(async () => {
-      try {
-        await runPipeline(
-          { text, wordCount, chapterTitle, bookId, bookTitle, chapterIndex, totalChapters },
-          { uid: authUser.uid, email: authUser.email ?? '' },
-          reportProgress,
-          adminDb,
-        );
-      } catch (err) {
+    waitUntil(
+      runPipeline(
+        { text, wordCount, chapterTitle, bookId, bookTitle, chapterIndex, totalChapters },
+        { uid: authUser.uid, email: authUser.email ?? '' },
+        reportProgress,
+        adminDb,
+      ).catch(async (err) => {
         console.error('Pipeline error:', err);
         try {
           await adminDb.collection('jobs').doc(jobId).update({
@@ -102,8 +95,8 @@ export async function POST(req: NextRequest) {
             completedAt: new Date().toISOString(),
           });
         } catch { /* ignore */ }
-      }
-    });
+      })
+    );
   }
 
   return Response.json({ jobId });

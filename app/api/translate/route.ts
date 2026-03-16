@@ -25,14 +25,17 @@ function callClaudeOnce(params: {
   messages: Array<{ role: string; content: string }>; apiKey: string;
 }): Promise<string> {
   return new Promise((resolve, reject) => {
+    // Use prompt caching: send system as a cacheable content block
     const body = JSON.stringify({
       model: params.model, max_tokens: params.max_tokens,
-      system: params.system, messages: params.messages,
+      system: [{ type: 'text', text: params.system, cache_control: { type: 'ephemeral' } }],
+      messages: params.messages,
     });
     const req = https.request({
       hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
       headers: {
         'x-api-key': params.apiKey, 'anthropic-version': '2023-06-01',
+        'anthropic-beta': 'prompt-caching-2024-07-31',
         'content-type': 'application/json', 'content-length': Buffer.byteLength(body),
       },
     }, (res) => {
@@ -829,27 +832,17 @@ export async function POST(req: NextRequest) {
         let smootherFlagged = 0;
 
         async function processChunk(i: number) {
-          // ── Translate ──
+          // ── Translate (pipelined: starts reviewing as soon as translation is done) ──
           if (!translatorStarted) { translatorStarted = true; send({ stage: 'translator', status: 'running' }); }
-          translations[i] = enforceTerminology(await translatorAgent(key, chunks[i], translationMemory, i, chunks.length));
+          translations[i] = enforceTerminology(await translatorAgent(key, chunks[i], '', i, chunks.length));
           translateDone++;
           send({ stage: 'translator', status: 'progress', current: translateDone, total: chunks.length, index: i, translation: translations[i] });
           if (translateDone === chunks.length && !translatorFinished) {
             translatorFinished = true;
-            send({ stage: 'translator', status: 'done', memorySize: translationMemory.length });
+            send({ stage: 'translator', status: 'done', memorySize: 0 });
           }
 
-          // ── Extract translation memory from EVERY chunk (Change 5) ──
-          if (chunks.length > 1) {
-            try {
-              const mem = await extractTranslationMemory(key, chunks[i], translations[i]);
-              if (mem) {
-                translationMemory = (translationMemory + '\n' + mem).trim().slice(-2000);
-              }
-            } catch { /* ignore memory extraction failure */ }
-          }
-
-          // ── Certification Review (Pass 1 — Opus) ──
+          // ── Certification Review (Opus) — starts immediately after this chunk's translation ──
           if (!reviewerStarted) { reviewerStarted = true; send({ stage: 'reviewer', status: 'running' }); }
           reviews[i] = await reviewerAgent(key, chunks[i], translations[i]);
           send({ stage: 'reviewer', status: 'progress', completed: reviewDone + 1, total: chunks.length, index: i, categories: reviews[i].categories, pitfalls: reviews[i].pitfalls, issues: reviews[i].issues, score: reviews[i].score, certifiable: reviews[i].certifiable });
@@ -883,14 +876,9 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        // Process chunk 0 sequentially for translation memory seeding
-        await processChunk(0);
-
-        // Process remaining chunks in parallel through the full pipeline
-        if (chunks.length > 1) {
-          const remaining = Array.from({ length: chunks.length - 1 }, (_, i) => i + 1);
-          await parallelBatch(remaining, async (i) => processChunk(i), BATCH);
-        }
+        // Process ALL chunks in parallel — each chunk pipelines through translate→review→smooth
+        const allChunks = Array.from({ length: chunks.length }, (_, i) => i);
+        await parallelBatch(allChunks, async (i) => processChunk(i), BATCH);
 
         // Ensure all stage-done events fire even for single-chunk case
         if (!translatorFinished) { translatorFinished = true; send({ stage: 'translator', status: 'done', memorySize: translationMemory.length }); }

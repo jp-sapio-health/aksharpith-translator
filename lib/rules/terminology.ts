@@ -26,6 +26,18 @@ export const TERMINOLOGY_RULES: TerminologyRule[] = [
   { pattern: /\bdivine abode\b/gi, replacement: 'Akshardham', rule: 'divine abode\u2192Akshardham' },
   { pattern: /\bShrijimaharaj\b/g, replacement: 'Shriji Maharaj', rule: 'Shrijimaharaj\u2192Shriji Maharaj' },
   { pattern: /\bShri Ji Maharaj\b/g, replacement: 'Shriji Maharaj', rule: 'Shri Ji Maharaj\u2192Shriji Maharaj' },
+  // F-02: sadhus used for BAPS ascetics
+  { pattern: /\bsadhus\b/gi, replacement: (m: string) => m[0] === 'S' ? 'Swamis' : 'swamis', rule: 'sadhu(s)\u2192Swami(s)' },
+  { pattern: /\bsadhu\b/gi, replacement: (m: string) => m[0] === 'S' ? 'Swami' : 'swami', rule: 'sadhu\u2192Swami' },
+  // F-03: sannyasis for impostors
+  { pattern: /\bsannyasis\b/gi, replacement: 'bawas', rule: 'sannyasis\u2192bawas' },
+  { pattern: /\bsannyasi\b/gi, replacement: 'bawa', rule: 'sannyasi\u2192bawa' },
+  // F-05: run-to-run term variation
+  { pattern: /\bavatari personage\b/gi, replacement: 'avatari Purush', rule: 'avatari personage\u2192avatari Purush' },
+  { pattern: /\bavataric Purush\b/g, replacement: 'avatari Purush', rule: 'avataric Purush\u2192avatari Purush' },
+  // Additional mandatory terminology
+  { pattern: /\bfellowship\b/gi, replacement: 'satsang', rule: 'fellowship\u2192satsang' },
+  { pattern: /\brecitation\b/gi, replacement: 'mukhpath', rule: 'recitation\u2192mukhpath' },
 ];
 
 export const PERSONAL_NAME_RULES: TerminologyRule[] = [
@@ -34,6 +46,7 @@ export const PERSONAL_NAME_RULES: TerminologyRule[] = [
   { pattern: /\bNaranda\b/g, replacement: 'Naran\u2019da', rule: 'Naranda\u2192Naran\u2019da' },
 ];
 
+// F-01: Historical name corrections (era-correct names)
 export const PLACE_NAME_RULES: TerminologyRule[] = [
   { pattern: /\bPipalana\b/g, replacement: 'Piplana', rule: 'Pipalana\u2192Piplana' },
   { pattern: /\bChanasad\b/g, replacement: 'Chansad', rule: 'Chanasad\u2192Chansad' },
@@ -42,6 +55,39 @@ export const PLACE_NAME_RULES: TerminologyRule[] = [
   { pattern: /\bDungara\b/g, replacement: 'Dangara', rule: 'Dungara\u2192Dangara' },
   { pattern: /\bBhadarod\b/g, replacement: 'Bhadrod', rule: 'Bhadarod\u2192Bhadrod' },
   { pattern: /\bChokshi\b/g, replacement: 'Choksi', rule: 'Chokshi\u2192Choksi' },
+  { pattern: /\bMumbai Province\b/g, replacement: 'Bombay Province', rule: 'Mumbai Province\u2192Bombay Province' },
+  { pattern: /\bSaurashtra\b/g, replacement: 'Kathiawad', rule: 'Saurashtra\u2192Kathiawad' },
+];
+
+// Forbidden vocabulary — flagged (not removed, since some are context-dependent)
+export const FORBIDDEN_VOCAB_RULES: TerminologyRule[] = [
+  { pattern: /\blegendary\b/gi, replacement: 'renowned', rule: 'forbidden: legendary\u2192renowned' },
+  { pattern: /\bcharismatic\b/gi, replacement: 'inspiring', rule: 'forbidden: charismatic\u2192inspiring' },
+  { pattern: /\brevolutionary\b/gi, replacement: 'transformative', rule: 'forbidden: revolutionary\u2192transformative' },
+  { pattern: /\brevolutionised\b/gi, replacement: 'transformed', rule: 'forbidden: revolutionised\u2192transformed' },
+  { pattern: /\bprogressive\b/gi, replacement: 'devoted', rule: 'forbidden: progressive\u2192devoted' },
+  { pattern: /\bhumanitarian\b/gi, replacement: 'compassionate', rule: 'forbidden: humanitarian\u2192compassionate' },
+  { pattern: /\bempowerment\b/gi, replacement: 'spiritual strength', rule: 'forbidden: empowerment\u2192spiritual strength' },
+  { pattern: /\bstakeholder\b/gi, replacement: 'devotee', rule: 'forbidden: stakeholder\u2192devotee' },
+  { pattern: /\brole model\b/gi, replacement: 'ideal', rule: 'forbidden: role model\u2192ideal' },
+  { pattern: /\bmilestone\b/gi, replacement: 'occasion', rule: 'forbidden: milestone\u2192occasion' },
+  { pattern: /\blife-changing\b/gi, replacement: 'spiritually transformative', rule: 'forbidden: life-changing' },
+];
+
+// Hedging phrases — removed to preserve doctrinal authority
+export const HEDGING_RULES: TerminologyRule[] = [
+  { pattern: /\bIt seems that\b/gi, replacement: '', rule: 'hedging removed: "It seems that"' },
+  { pattern: /\bit seems\b/gi, replacement: '', rule: 'hedging removed: "it seems"' },
+  { pattern: /\bIt is believed that\b/gi, replacement: '', rule: 'hedging removed: "It is believed that"' },
+  { pattern: /\bit is said that\b/gi, replacement: '', rule: 'hedging removed: "it is said that"' },
+  { pattern: /\bPerhaps\b/g, replacement: '', rule: 'hedging removed: "Perhaps"' },
+  { pattern: /\bperhaps\b/g, replacement: '', rule: 'hedging removed: "perhaps"' },
+  { pattern: /\bprobably\b/gi, replacement: '', rule: 'hedging removed: "probably"' },
+];
+
+// R-06: American date format → British date format
+export const DATE_FORMAT_RULES: TerminologyRule[] = [
+  { pattern: /\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),\s*(\d{4})\b/g, replacement: '$2 $1 $3', rule: 'American date\u2192British date format' },
 ];
 
 export const DIACRITICS_MAP: Record<string, string> = {

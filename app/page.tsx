@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 import OutputView from './components/OutputView';
 import ReviewPanel from './components/ReviewPanel';
 import DownloadMenu from './components/DownloadMenu';
+import QualitySummary from './components/QualitySummary';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -578,6 +579,8 @@ export default function Home() {
   const [pipelineError, setPipelineError] = useState<string | null>(null);
   const [copied, setCopied]       = useState(false);
   const [enforcerCorrections, setEnforcerCorrections] = useState<EnforcerCorrection[]>([]);
+  const [enforcerTotalFixes, setEnforcerTotalFixes] = useState(0);
+  const [reviewerSummary, setReviewerSummary] = useState<{ avgScore: number; certifiedCount: number; totalChunks: number; categories: Array<{ id: string; weight: number; avgScore: number }>; totalDeductions: number; topIssues: string[] } | null>(null);
   const [rulesExpanded, setRulesExpanded] = useState(false);
   const [translationId, setTranslationId] = useState<string | null>(null);
   const [reviewPanelOpen, setReviewPanelOpen] = useState(false);
@@ -611,6 +614,85 @@ export default function Home() {
 
   // ── Run a single section through the pipeline ──────────────────────────────
 
+  // ── Apply polling progress to UI state ────────────────────────────────────
+
+  const applyProgress = useCallback((progress: Record<string, unknown> | null) => {
+    if (!progress) return;
+    const stages = progress.stages as Record<string, Record<string, unknown>> | undefined;
+    const currentStage = progress.currentStage as string | undefined;
+    const pollChunks = progress.chunks as Array<Record<string, unknown>> | undefined;
+
+    if (stages) {
+      setStages(prev => prev.map(s => {
+        const sd = stages[s.id];
+        if (!sd) return s;
+        const status = (sd.status as StageStatus) ?? s.status;
+        let msg = s.tagline;
+        let progressPct: number | null = null;
+
+        if (s.id === 'chunker' && status === 'done') {
+          const n = sd.chunkCount as number ?? 0;
+          msg = `Split into ${n} chunk${n !== 1 ? 's' : ''} at paragraph/verse boundaries`;
+          progressPct = 100;
+        }
+        if (s.id === 'translator') {
+          const c = sd.completed as number ?? 0, t = sd.total as number ?? 1;
+          if (status === 'running') { msg = `Translating chunk ${c} of ${t}\u2026`; progressPct = Math.round(c / t * 100); }
+          if (status === 'done') { msg = 'All chunks translated'; progressPct = 100; }
+        }
+        if (s.id === 'reviewer') {
+          const c = sd.completed as number ?? 0, t = sd.total as number ?? 1;
+          const avg = sd.avgScore as number ?? 0;
+          const cert = sd.certCount as number ?? 0;
+          const rechecked = sd.rechecked as number ?? 0;
+          if (status === 'running') { msg = `Reviewed ${c} of ${t} chunks\u2026`; progressPct = Math.round(c / t * 100); }
+          if (status === 'done') { msg = `Review complete \u2014 ${cert}/${t} certified, avg ${avg}%${rechecked > 0 ? ` (${rechecked} re-reviewed)` : ''}`; progressPct = 100; }
+        }
+        if (s.id === 'smoother') {
+          const c = sd.completed as number ?? 0, t = sd.total as number ?? 1;
+          if (status === 'running') { msg = `Smoothed ${c} of ${t} chunks\u2026`; progressPct = Math.round(c / t * 100); }
+          if (status === 'done') { msg = 'Readability pass complete'; progressPct = 100; }
+        }
+        if (s.id === 'assembler') {
+          if (status === 'running') msg = 'Joining chunks into a single document\u2026';
+          if (status === 'done') msg = 'Document assembled';
+        }
+        if (s.id === 'enforcer') {
+          if (status === 'running') msg = 'Applying Aksharpith house rules\u2026';
+          if (status === 'done') { const f = sd.totalFixes as number ?? 0; msg = `Rules enforced \u2014 ${f} correction${f !== 1 ? 's' : ''} applied`; }
+        }
+
+        // Mark stages before current as done
+        return { ...s, status, msg, progress: progressPct };
+      }));
+    }
+
+    // Update chunk cards from poll data
+    if (pollChunks && pollChunks.length > 0) {
+      for (const c of pollChunks) {
+        const idx = c.index as number;
+        const existing = chunkMap.current[idx] ?? { index: idx, original: '' };
+        chunkMap.current[idx] = {
+          ...existing,
+          translation: (c.translation as string) ?? existing.translation,
+          reviewer1: c.categories ? {
+            categories: c.categories as Reviewer1Category[],
+            pitfalls: (c.pitfalls as string[]) ?? [],
+            score: (c.score as number) ?? 0,
+            certifiable: (c.certifiable as boolean) ?? false,
+          } : existing.reviewer1,
+          score: (c.score as number) ?? existing.score,
+          issues: (c.issues as string[]) ?? existing.issues,
+          scoreHistory: (c.scoreHistory as number[]) ?? existing.scoreHistory,
+          reviewRound: (c.reviewRound as number) ?? existing.reviewRound,
+        };
+      }
+      setChunks(Object.values(chunkMap.current).sort((a, b) => a.index - b.index));
+    }
+  }, [updateStage]);
+
+  // ── Run a single section through the pipeline (polling) ────────────────────
+
   const runSection = async (text: string, chapterTitle?: string, bookId?: string, chapterIndex?: number, totalChapters?: number): Promise<{ output: string; avg: number; wordCount: number } | null> => {
     setStages(INITIAL_STAGES);
     setChunks([]);
@@ -618,178 +700,57 @@ export default function Home() {
     chunkMap.current = {};
 
     const token = await getIdToken();
-    const response = await fetch('/api/translate', {
+
+    // Step 1: Create job
+    const createRes = await fetch('/api/translate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...(token ? { 'Authorization': `Bearer ${token}` } : {}) },
       body: JSON.stringify({ text, chapterTitle, bookId, chapterIndex, totalChapters, bookTitle: uploadedFilename || undefined }),
       signal: abortRef.current?.signal,
     });
 
-    if (!response.ok) {
-      const err = await response.text().catch(() => `HTTP ${response.status}`);
+    if (!createRes.ok) {
+      const err = await createRes.text().catch(() => `HTTP ${createRes.status}`);
       throw new Error(err);
     }
-    if (!response.body) throw new Error('No stream body');
 
-    const reader  = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer    = '';
-    let streamError: string | null = null;
+    const { jobId } = await createRes.json();
+    updateStage('chunker', { status: 'running', msg: 'Job created \u2014 pipeline starting\u2026' });
+
+    // Step 2: Poll for status
     let result: { output: string; avg: number; wordCount: number } | null = null;
 
-    outer: while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    while (true) {
+      if (abortRef.current?.signal.aborted) throw new DOMException('Aborted', 'AbortError');
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
+      await new Promise(r => setTimeout(r, 1500));
 
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        let ev: Record<string, unknown>;
-        try { ev = JSON.parse(line.slice(6)); } catch { continue; }
+      const pollRes = await fetch(`/api/translate/${jobId}`, {
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+        signal: abortRef.current?.signal,
+      });
 
-        if (ev.error) { streamError = ev.error as string; break outer; }
+      if (!pollRes.ok) throw new Error(`Poll failed: HTTP ${pollRes.status}`);
+      const poll = await pollRes.json();
 
-        // ── Translation ID (emitted after Firestore save) ────────────
-        if (ev.translationId) {
-          setTranslationId(ev.translationId as string);
-        }
+      // Apply progress to UI
+      applyProgress(poll.progress);
 
-        // ── Chunker ───────────────────────────────────────────────────
-        if (ev.stage === 'chunker') {
-          if (ev.status === 'running') {
-            updateStage('chunker', { status: 'running', msg: 'Analysing structure and verse boundaries…' });
-          } else if (ev.status === 'done') {
-            const n = ev.count as number;
-            updateStage('chunker', { status: 'done', msg: `Split into ${n} chunk${n !== 1 ? 's' : ''} at paragraph/verse boundaries`, progress: 100 });
-            (ev.chunks as string[]).forEach((t, i) => { chunkMap.current[i] = { index: i, original: t }; });
-            setChunks((ev.chunks as string[]).map((t, i) => ({ index: i, original: t })));
-          }
-        }
+      if (poll.status === 'completed' && poll.result) {
+        const r = poll.result;
+        setEnforcerCorrections(r.corrections ?? []);
+        setEnforcerTotalFixes(r.totalFixes ?? 0);
+        if (r.reviewerSummary) setReviewerSummary(r.reviewerSummary);
+        if (r.translationId) setTranslationId(r.translationId);
+        result = { output: r.output, avg: r.avgScore, wordCount: r.wordCount };
+        break;
+      }
 
-        // ── Translator ────────────────────────────────────────────────
-        if (ev.stage === 'translator') {
-          if (ev.status === 'running') {
-            updateStage('translator', { status: 'running', msg: 'Applying Aksharpith glossary and house rules…', progress: 0 });
-          } else if (ev.status === 'progress') {
-            const cur = ev.current as number, tot = ev.total as number;
-            updateStage('translator', { status: 'running', msg: `Translating chunk ${cur} of ${tot}…`, progress: Math.round((cur - 1) / tot * 100) });
-            const idx = ev.index as number;
-            chunkMap.current[idx] = { ...chunkMap.current[idx], translation: ev.translation as string };
-            setChunks(Object.values(chunkMap.current).sort((a, b) => a.index - b.index));
-          } else if (ev.status === 'done') {
-            updateStage('translator', { status: 'done', msg: 'All chunks translated with cross-chunk memory', progress: 100 });
-          }
-        }
-
-        // ── Reviewer (combined cert + style) — parallel ─────────────
-        if (ev.stage === 'reviewer') {
-          if (ev.status === 'running') {
-            updateStage('reviewer', { status: 'running', msg: 'Running Aksharpith certification audit\u2026', progress: 0 });
-          } else if (ev.status === 'rechecking') {
-            const n = ev.count as number, round = ev.round as number;
-            const lowIndices = Object.values(chunkMap.current)
-              .filter(c => c.score !== undefined && c.score < 96)
-              .map(c => c.index + 1);
-            const chunkList = lowIndices.length <= 5 ? lowIndices.join(', ') : `${lowIndices.slice(0, 5).join(', ')}\u2026`;
-            updateStage('reviewer', { status: 'running', msg: `Round ${round + 1}: Re-reviewing ${n} chunk${n !== 1 ? 's' : ''} below 96% (chunk${n !== 1 ? 's' : ''} ${chunkList})\u2026`, progress: null });
-            // Mark chunks as actively reviewing
-            for (const c of Object.values(chunkMap.current)) {
-              if (c.score !== undefined && c.score < 96) {
-                chunkMap.current[c.index] = { ...chunkMap.current[c.index], reviewing: true };
-              }
-            }
-            setChunks(Object.values(chunkMap.current).sort((a, b) => a.index - b.index));
-          } else if (ev.status === 'progress') {
-            const done = ev.completed as number, tot = ev.total as number;
-            const recheck = ev.recheck as boolean | undefined;
-            const idx = ev.index as number;
-            const newScore = ev.score as number;
-            const round = ev.round as number | undefined;
-            const prev = chunkMap.current[idx];
-            const prevHistory = prev.scoreHistory ?? [];
-            // On first review, initialize history; on re-review, append
-            const scoreHistory = recheck ? [...prevHistory, newScore] : [newScore];
-
-            if (recheck) {
-              const prevScore = prevHistory[prevHistory.length - 1] ?? prev.score ?? 0;
-              const delta = newScore - prevScore;
-              const arrow = delta > 0 ? '\u2191' : delta < 0 ? '\u2193' : '\u2192';
-              updateStage('reviewer', { status: 'running', msg: `Round ${(round ?? 1) + 1}: Chunk ${idx + 1} re-reviewed \u2014 ${prevScore}% ${arrow} ${newScore}%`, progress: Math.round(done / tot * 100) });
-            } else {
-              updateStage('reviewer', { status: 'running', msg: `Reviewed ${done} of ${tot} chunks\u2026`, progress: Math.round(done / tot * 100) });
-            }
-
-            chunkMap.current[idx] = {
-              ...prev,
-              reviewer1: {
-                categories:  ev.categories  as Reviewer1Category[],
-                pitfalls:    ev.pitfalls    as string[],
-                score:       newScore,
-                certifiable: ev.certifiable as boolean,
-              },
-              score: newScore,
-              issues: ev.issues as string[],
-              revised: ev.revised as string,
-              approved: newScore >= 96,
-              scoreHistory,
-              reviewRound: round ?? 0,
-              reviewing: false,
-            };
-            setChunks(Object.values(chunkMap.current).sort((a, b) => a.index - b.index));
-          } else if (ev.status === 'done') {
-            const avg = Math.round(ev.avgScore as number);
-            const certCount = ev.certCount as number, total = ev.total as number;
-            const rechecked = ev.rechecked as number;
-            // Clear reviewing flags
-            for (const c of Object.values(chunkMap.current)) {
-              if (c.reviewing) chunkMap.current[c.index] = { ...chunkMap.current[c.index], reviewing: false };
-            }
-            updateStage('reviewer', { status: 'done', msg: `Review complete \u2014 ${certCount}/${total} certified, avg ${avg}%${rechecked > 0 ? ` (${rechecked} re-reviewed)` : ''}`, progress: 100 });
-            setChunks(Object.values(chunkMap.current).sort((a, b) => a.index - b.index));
-          }
-        }
-
-        // ── Smoother — parallel ─────────────────────────────────────
-        if (ev.stage === 'smoother') {
-          if (ev.status === 'running') {
-            updateStage('smoother', { status: 'running', msg: 'Readability pass (parallel)…', progress: 0 });
-          } else if (ev.status === 'progress') {
-            const done = ev.completed as number, tot = ev.total as number;
-            updateStage('smoother', { status: 'running', msg: `Smoothed ${done} of ${tot} chunks…`, progress: Math.round(done / tot * 100) });
-          } else if (ev.status === 'done') {
-            updateStage('smoother', { status: 'done', msg: 'Readability pass complete', progress: 100 });
-          }
-        }
-
-        // ── Assembler ─────────────────────────────────────────────────
-        if (ev.stage === 'assembler') {
-          if (ev.status === 'running') {
-            updateStage('assembler', { status: 'running', msg: 'Joining chunks into a single document…' });
-          } else if (ev.status === 'done') {
-            updateStage('assembler', { status: 'done', msg: 'Document assembled' });
-          }
-        }
-
-        // ── Rules Enforcer ────────────────────────────────────────────
-        if (ev.stage === 'enforcer') {
-          if (ev.status === 'running') {
-            updateStage('enforcer', { status: 'running', msg: 'Applying Aksharpith house rules\u2026' });
-          } else if (ev.status === 'done') {
-            const totalFixes = (ev.totalFixes as number) ?? 0;
-            const corrections = (ev.corrections as EnforcerCorrection[]) ?? [];
-            const wCount = ev.wordCount as number, avg = ev.avgScore as number;
-            updateStage('enforcer', { status: 'done', msg: `Rules enforced \u2014 ${totalFixes} correction${totalFixes !== 1 ? 's' : ''} applied` });
-            setEnforcerCorrections(corrections);
-            result = { output: ev.output as string, avg, wordCount: wCount };
-          }
-        }
+      if (poll.status === 'failed') {
+        throw new Error(poll.error || 'Pipeline failed');
       }
     }
 
-    if (streamError) throw new Error(streamError);
     return result;
   };
 
@@ -812,6 +773,8 @@ export default function Home() {
     setRulesExpanded(false);
     setTranslationId(null);
     setCommentCounts({});
+    setReviewerSummary(null);
+    setEnforcerTotalFixes(0);
     setIsRunning(true);
     setTab('pipeline');
     abortRef.current = new AbortController();
@@ -1222,34 +1185,11 @@ export default function Home() {
                 }}
                 commentCounts={commentCounts}
               />
-              {enforcerCorrections.length > 0 && (
-                <div style={{ background: 'var(--bg-warm)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', overflow: 'hidden' }} className="fadein">
-                  <button
-                    onClick={() => setRulesExpanded(prev => !prev)}
-                    style={{
-                      width: '100%', padding: '12px 18px', background: 'none', border: 'none', cursor: 'pointer',
-                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                      fontFamily: "'Karla', sans-serif", fontSize: 11, fontWeight: 600,
-                      letterSpacing: '1px', textTransform: 'uppercase', color: 'var(--text-muted)',
-                    }}
-                  >
-                    <span>Rules Applied ({enforcerCorrections.reduce((s, c) => s + c.count, 0)} corrections)</span>
-                    <span style={{ fontSize: 11, color: 'var(--text-light)' }}>{rulesExpanded ? '\u25B2' : '\u25BC'}</span>
-                  </button>
-                  {rulesExpanded && (
-                    <div style={{ padding: '0 18px 14px', display: 'flex', flexDirection: 'column', gap: 4 }}>
-                      {enforcerCorrections.map((c, i) => (
-                        <div key={i} style={{ fontSize: 13, fontWeight: 300, color: 'var(--text-muted)', lineHeight: 1.6 }}>
-                          <span style={{ color: 'var(--red)', textDecoration: 'line-through' }}>{c.from}</span>
-                          {' \u2192 '}
-                          <span style={{ color: 'var(--green)', fontWeight: 500 }}>{c.to}</span>
-                          <span style={{ color: 'var(--text-light)', fontSize: 11, marginLeft: 6 }}>({c.count} occurrence{c.count !== 1 ? 's' : ''})</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
+              <QualitySummary
+                corrections={enforcerCorrections}
+                reviewerSummary={reviewerSummary}
+                totalFixes={enforcerTotalFixes}
+              />
               <div style={{ display: 'flex', gap: 10 }}>
                 <button onClick={handleCopy} style={{ flex: 1, padding: '14px 24px', border: '1px solid var(--border)', borderRadius: 'var(--radius)', background: 'var(--bg-white)', color: 'var(--text-muted)', fontFamily: "'Karla', sans-serif", fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase', cursor: 'pointer', transition: 'all 0.2s' }}>
                   {copied ? 'Copied \u2713' : 'Copy Translation'}

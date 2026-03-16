@@ -1,0 +1,6 @@
+node_modules/
+dist/
+# Copied from lib/ at prebuild — source of truth is ../lib/
+src/pipeline.ts
+src/job-types.ts
+src/rules/

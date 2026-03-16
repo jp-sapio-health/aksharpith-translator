@@ -3,6 +3,9 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { useAuth } from '../lib/auth-context';
 import { useRouter } from 'next/navigation';
+import OutputView from './components/OutputView';
+import ReviewPanel from './components/ReviewPanel';
+import DownloadMenu from './components/DownloadMenu';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -576,6 +579,10 @@ export default function Home() {
   const [copied, setCopied]       = useState(false);
   const [enforcerCorrections, setEnforcerCorrections] = useState<EnforcerCorrection[]>([]);
   const [rulesExpanded, setRulesExpanded] = useState(false);
+  const [translationId, setTranslationId] = useState<string | null>(null);
+  const [reviewPanelOpen, setReviewPanelOpen] = useState(false);
+  const [reviewSectionIndex, setReviewSectionIndex] = useState(0);
+  const [commentCounts, setCommentCounts] = useState<Record<number, number>>({});
 
   // Book mode
   const [isBookMode, setIsBookMode]     = useState(false);
@@ -644,6 +651,11 @@ export default function Home() {
         try { ev = JSON.parse(line.slice(6)); } catch { continue; }
 
         if (ev.error) { streamError = ev.error as string; break outer; }
+
+        // ── Translation ID (emitted after Firestore save) ────────────
+        if (ev.translationId) {
+          setTranslationId(ev.translationId as string);
+        }
 
         // ── Chunker ───────────────────────────────────────────────────
         if (ev.stage === 'chunker') {
@@ -798,6 +810,8 @@ export default function Home() {
     setOutput('');
     setEnforcerCorrections([]);
     setRulesExpanded(false);
+    setTranslationId(null);
+    setCommentCounts({});
     setIsRunning(true);
     setTab('pipeline');
     abortRef.current = new AbortController();
@@ -876,14 +890,6 @@ export default function Home() {
     await navigator.clipboard.writeText(output);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
-  };
-
-  const handleDownload = () => {
-    const blob = new Blob([output], { type: 'text/plain;charset=utf-8' });
-    const url  = URL.createObjectURL(blob);
-    const a    = Object.assign(document.createElement('a'), { href: url, download: `${uploadedFilename ? uploadedFilename.replace(/\.[^.]+$/, '') : 'translation'}-en.txt` });
-    a.click();
-    URL.revokeObjectURL(url);
   };
 
   const headerRef = useRef<HTMLElement>(null);
@@ -1155,6 +1161,38 @@ export default function Home() {
         </div>
       )}
 
+      {/* ── Review Panel Overlay ── */}
+      <ReviewPanel
+        translationId={translationId}
+        sectionIndex={reviewSectionIndex}
+        open={reviewPanelOpen}
+        onClose={() => {
+          setReviewPanelOpen(false);
+          // Refresh comment counts for the section
+          if (translationId) {
+            (async () => {
+              try {
+                const token = await getIdToken();
+                const res = await fetch(`/api/reviews/${translationId}`, {
+                  headers: token ? { Authorization: `Bearer ${token}` } : {},
+                });
+                if (res.ok) {
+                  const data = await res.json();
+                  const counts: Record<number, number> = {};
+                  for (const c of (data.comments ?? [])) {
+                    const idx = (c as Record<string, unknown>).sectionIndex as number;
+                    counts[idx] = (counts[idx] ?? 0) + 1;
+                  }
+                  setCommentCounts(counts);
+                }
+              } catch { /* ignore */ }
+            })();
+          }
+        }}
+        user={user ? { uid: user.uid, email: user.email, displayName: user.displayName } : null}
+        getToken={getIdToken}
+      />
+
       {/* ── OUTPUT TAB ── */}
       {tab === 'output' && (
         <div style={{ padding: '24px 20px', display: 'flex', flexDirection: 'column', gap: 20, maxWidth: 780, margin: '0 auto', width: '100%' }}>
@@ -1176,9 +1214,14 @@ export default function Home() {
                 </div>
               </div>
               <div style={{ width: 48, height: 1, background: 'var(--border)' }} />
-              <div style={{ background: 'var(--bg-white)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: 24, fontFamily: '"Cormorant Garamond", serif', fontSize: 17, fontWeight: 400, lineHeight: 1.9, color: 'var(--text-body)', whiteSpace: 'pre-wrap' }} className="fadein">
-                {output}
-              </div>
+              <OutputView
+                output={output}
+                onCommentClick={(sectionIndex) => {
+                  setReviewSectionIndex(sectionIndex);
+                  setReviewPanelOpen(true);
+                }}
+                commentCounts={commentCounts}
+              />
               {enforcerCorrections.length > 0 && (
                 <div style={{ background: 'var(--bg-warm)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', overflow: 'hidden' }} className="fadein">
                   <button
@@ -1211,9 +1254,12 @@ export default function Home() {
                 <button onClick={handleCopy} style={{ flex: 1, padding: '14px 24px', border: '1px solid var(--border)', borderRadius: 'var(--radius)', background: 'var(--bg-white)', color: 'var(--text-muted)', fontFamily: "'Karla', sans-serif", fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase', cursor: 'pointer', transition: 'all 0.2s' }}>
                   {copied ? 'Copied \u2713' : 'Copy Translation'}
                 </button>
-                <button onClick={handleDownload} style={{ padding: '14px 20px', border: '1px solid var(--border)', borderRadius: 'var(--radius)', background: 'var(--bg-white)', color: 'var(--text-muted)', fontFamily: "'Karla', sans-serif", fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase', cursor: 'pointer', transition: 'all 0.2s' }}>
-                  Download .txt
-                </button>
+                <DownloadMenu
+                  output={output}
+                  translationId={translationId}
+                  filename={uploadedFilename}
+                  getToken={getIdToken}
+                />
               </div>
             </>
           )}

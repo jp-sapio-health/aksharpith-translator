@@ -50,7 +50,7 @@ export async function POST(req: NextRequest) {
     startedAt: null,
     completedAt: null,
     error: null,
-    progress: null,
+    progress: { currentStage: 'pending', stages: {}, chunks: [] },
     result: null,
   };
 
@@ -60,24 +60,30 @@ export async function POST(req: NextRequest) {
   // Run pipeline in background — waitUntil keeps the function alive after response
   if (process.env.FIREBASE_FUNCTIONS !== 'true') {
     const reportProgress = async (update: JobProgressUpdate) => {
-      const firestoreUpdate: Record<string, unknown> = {};
-      if (update.status) firestoreUpdate.status = update.status;
-      if (update.startedAt) firestoreUpdate.startedAt = update.startedAt;
-      if (update.completedAt) firestoreUpdate.completedAt = update.completedAt;
-      if (update.error) firestoreUpdate.error = update.error;
-      if (update.result) firestoreUpdate.result = update.result;
+      const doc: Record<string, unknown> = {};
+      if (update.status) doc.status = update.status;
+      if (update.startedAt) doc.startedAt = update.startedAt;
+      if (update.completedAt) doc.completedAt = update.completedAt;
+      if (update.error) doc.error = update.error;
+      if (update.result) doc.result = update.result;
       if (update.progress) {
-        if (update.progress.currentStage) firestoreUpdate['progress.currentStage'] = update.progress.currentStage;
-        if (update.progress.chunks) firestoreUpdate['progress.chunks'] = update.progress.chunks;
+        // Build a full progress object to merge
+        const existingDoc = await adminDb.collection('jobs').doc(jobId).get();
+        const existing = existingDoc.data()?.progress ?? { currentStage: '', stages: {}, chunks: [] };
+        const merged = {
+          currentStage: update.progress.currentStage ?? existing.currentStage,
+          stages: { ...existing.stages },
+          chunks: update.progress.chunks ?? existing.chunks,
+        };
+        // Merge stage updates
         if (update.progress.stages) {
           for (const [stage, data] of Object.entries(update.progress.stages)) {
-            for (const [key, val] of Object.entries(data as unknown as Record<string, unknown>)) {
-              firestoreUpdate[`progress.stages.${stage}.${key}`] = val;
-            }
+            merged.stages[stage] = { ...(merged.stages[stage] ?? {}), ...(data as unknown as Record<string, unknown>) };
           }
         }
+        doc.progress = merged;
       }
-      await adminDb.collection('jobs').doc(jobId).update(firestoreUpdate);
+      await adminDb.collection('jobs').doc(jobId).set(doc, { merge: true });
     };
 
     waitUntil(

@@ -16,7 +16,7 @@ interface StageState {
   status: StageStatus; msg: string; progress: number | null;
 }
 
-interface Reviewer1Category { id: string; name: string; pass: boolean; issues: string[]; }
+interface Reviewer1Category { id: string; name?: string; weight?: number; score?: number; pass: boolean; issues?: string[]; deductions?: string[]; }
 
 interface ChunkData {
   index: number; original: string;
@@ -38,10 +38,10 @@ interface ChapterResult {
 
 const INITIAL_STAGES: StageState[] = [
   { id: 'chunker',    num: '01', label: 'Chunker',    tagline: 'Splits text at paragraph and verse boundaries into \u2264500-word segments', status: 'waiting', msg: '', progress: null },
-  { id: 'translator', num: '02', label: 'Translator', tagline: 'Translates each chunk \u2014 trustee-of-tradition mindset, full BAPS glossary enforced', status: 'waiting', msg: '', progress: null },
-  { id: 'reviewer',   num: '03', label: 'Reviewer',   tagline: 'BAPS certification (8 categories, 20 pitfalls) + style and register audit in one pass', status: 'waiting', msg: '', progress: null },
-  { id: 'smoother',   num: '04', label: 'Smoother',   tagline: 'Readability pass \u2014 natural flow and transitions, without altering meaning', status: 'waiting', msg: '', progress: null },
-  { id: 'assembler',  num: '05', label: 'Assembler',  tagline: 'Joins all chunks into a single publication-ready document', status: 'waiting', msg: '', progress: null },
+  { id: 'translator', num: '02', label: 'Translator', tagline: 'Gold Standard Prompts 1\u20133 \u2014 trustee of tradition, glossary cross-reference, fidelity over fluency', status: 'waiting', msg: '', progress: null },
+  { id: 'reviewer',   num: '03', label: 'Reviewer',   tagline: 'Weighted 97% rubric \u2014 Fidelity 30, Terminology 25, Verse 15, Style 15, Historical 10, Completeness 5', status: 'waiting', msg: '', progress: null },
+  { id: 'smoother',   num: '04', label: 'Smoother',   tagline: 'Gold Standard Prompt 4 \u2014 readability pass with en dashes, British English, italicised verses', status: 'waiting', msg: '', progress: null },
+  { id: 'assembler',  num: '05', label: 'Assembler',  tagline: 'Structural join \u2014 trustee of tradition, no rewrites', status: 'waiting', msg: '', progress: null },
 ];
 
 const SAMPLE = `પ્રેમે પ્રગટ્યા રે સૂરજ સહજાનંદ, અધર્મ અંધારું ટાળિયું...
@@ -502,8 +502,8 @@ function ChunkCard({ chunk, expanded, onToggle }: { chunk: ChunkData; expanded: 
                     <div key={cat.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 7 }}>
                       <span style={{ fontSize: 13, color: cat.pass ? 'var(--green)' : 'var(--red)', flexShrink: 0, lineHeight: '18px' }}>{cat.pass ? '✓' : '✗'}</span>
                       <div>
-                        <span style={{ fontSize: 12, fontWeight: cat.pass ? 300 : 600, color: cat.pass ? 'var(--text-muted)' : 'var(--text)' }}>{cat.name}</span>
-                        {!cat.pass && cat.issues.map((iss, j) => (
+                        <span style={{ fontSize: 12, fontWeight: cat.pass ? 300 : 600, color: cat.pass ? 'var(--text-muted)' : 'var(--text)' }}>{cat.name || cat.id}{cat.weight ? ` (${cat.score ?? 0}/${cat.weight})` : ''}</span>
+                        {!cat.pass && (cat.deductions || cat.issues || []).map((iss, j) => (
                           <div key={j} style={{ fontSize: 11, color: 'var(--red)', fontWeight: 300, lineHeight: 1.4 }}>{iss}</div>
                         ))}
                       </div>
@@ -668,17 +668,17 @@ export default function Home() {
         // ── Reviewer (combined cert + style) — parallel ─────────────
         if (ev.stage === 'reviewer') {
           if (ev.status === 'running') {
-            updateStage('reviewer', { status: 'running', msg: 'Running BAPS certification + style audit (parallel)\u2026', progress: 0 });
+            updateStage('reviewer', { status: 'running', msg: 'Running weighted 97% rubric audit (parallel)\u2026', progress: 0 });
           } else if (ev.status === 'rechecking') {
             const n = ev.count as number, round = ev.round as number;
             const lowIndices = Object.values(chunkMap.current)
-              .filter(c => c.score !== undefined && c.score < 93)
+              .filter(c => c.score !== undefined && c.score < 96)
               .map(c => c.index + 1);
             const chunkList = lowIndices.length <= 5 ? lowIndices.join(', ') : `${lowIndices.slice(0, 5).join(', ')}\u2026`;
-            updateStage('reviewer', { status: 'running', msg: `Round ${round + 1}: Re-reviewing ${n} chunk${n !== 1 ? 's' : ''} below 93% (chunk${n !== 1 ? 's' : ''} ${chunkList})\u2026`, progress: null });
+            updateStage('reviewer', { status: 'running', msg: `Round ${round + 1}: Re-reviewing ${n} chunk${n !== 1 ? 's' : ''} below 96% (chunk${n !== 1 ? 's' : ''} ${chunkList})\u2026`, progress: null });
             // Mark chunks as actively reviewing
             for (const c of Object.values(chunkMap.current)) {
-              if (c.score !== undefined && c.score < 93) {
+              if (c.score !== undefined && c.score < 96) {
                 chunkMap.current[c.index] = { ...chunkMap.current[c.index], reviewing: true };
               }
             }
@@ -714,7 +714,7 @@ export default function Home() {
               score: newScore,
               issues: ev.issues as string[],
               revised: ev.revised as string,
-              approved: newScore >= 93,
+              approved: newScore >= 96,
               scoreHistory,
               reviewRound: round ?? 0,
               reviewing: false,

@@ -8,7 +8,6 @@ export const maxDuration = 300;
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
-const OPUS   = 'claude-opus-4-20250514';
 const SONNET = 'claude-sonnet-4-20250514';
 const BATCH  = 5;                // parallel chunk concurrency
 const RECHECK_THRESHOLD = 96;   // re-review chunks scoring below this on weighted rubric score
@@ -46,9 +45,18 @@ function callClaudeOnce(params: {
           return;
         }
         try {
-          const data = JSON.parse(raw) as { content?: Array<{ type: string; text?: string }> };
+          const data = JSON.parse(raw) as { content?: Array<{ type: string; text?: string }>; usage?: Record<string, number> };
           const text = data.content?.[0]?.text?.trim();
           if (!text) { reject(new Error('Empty response from Anthropic API')); return; }
+          // Log cache hits for cost monitoring
+          if (data.usage) {
+            const u = data.usage;
+            const cached = u.cache_read_input_tokens ?? 0;
+            const created = u.cache_creation_input_tokens ?? 0;
+            if (cached > 0 || created > 0) {
+              console.log(`[cache] model=${params.model} cached=${cached} created=${created} input=${u.input_tokens ?? 0} output=${u.output_tokens ?? 0}`);
+            }
+          }
           resolve(text);
         } catch { reject(new Error('Parse error: ' + raw.slice(0, 200))); }
       });
@@ -709,7 +717,7 @@ async function translatorAgent(
   apiKey: string, chunk: string, chunkIndex: number, totalChunks: number,
 ): Promise<string> {
   return callClaude({
-    model: OPUS, max_tokens: 8192, apiKey,
+    model: SONNET, max_tokens: 8192, apiKey,
     system: TRANSLATOR_SYSTEM,
     messages: [{ role: 'user', content: `Chunk ${chunkIndex + 1} of ${totalChunks}. Translate the following Gujarati text to English. Provide ONLY the translation.\n\nGUJARATI:\n${chunk}` }],
   });
@@ -729,7 +737,7 @@ async function reviewerAgent(apiKey: string, original: string, translation: stri
   let raw: string;
   try {
     raw = await callClaude({
-      model: OPUS, max_tokens: 16000, apiKey,
+      model: SONNET, max_tokens: 16000, apiKey,
       system: REVIEWER_SYSTEM,
       messages: [{ role: 'user', content: `GUJARATI SOURCE:\n${original}\n\nTRANSLATION TO AUDIT:\n${translation}` }],
     });
@@ -1066,7 +1074,7 @@ export async function POST(req: NextRequest) {
             send({ stage: 'translator', status: 'done', memorySize: 0 });
           }
 
-          // ── Certification Review (Opus) — starts immediately after this chunk's translation ──
+          // ── Certification Review (Sonnet) — starts immediately after this chunk's translation ──
           if (!reviewerStarted) { reviewerStarted = true; send({ stage: 'reviewer', status: 'running' }); }
           reviews[i] = await reviewerAgent(key, chunks[i], translations[i]);
           send({ stage: 'reviewer', status: 'progress', completed: reviewDone + 1, total: chunks.length, index: i, categories: reviews[i].categories, pitfalls: reviews[i].pitfalls, issues: reviews[i].issues, score: reviews[i].score, certifiable: reviews[i].certifiable });

@@ -717,7 +717,13 @@ export default function Home() {
     const { jobId } = await createRes.json();
     updateStage('chunker', { status: 'running', msg: 'Job created \u2014 pipeline starting\u2026' });
 
-    // Step 2: Poll for status
+    // Step 2: Trigger pipeline (fire-and-forget — this blocks on server while pipeline runs)
+    fetch(`/api/translate/${jobId}/run`, {
+      method: 'POST',
+      headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+    }).catch(() => { /* polling will detect failures */ });
+
+    // Step 3: Poll for status
     let result: { output: string; avg: number; wordCount: number } | null = null;
 
     while (true) {

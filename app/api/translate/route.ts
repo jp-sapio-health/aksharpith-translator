@@ -37,7 +37,7 @@ export async function POST(req: NextRequest) {
       status: 'pending',
       uid: authUser.uid,
       email: authUser.email ?? '',
-      input: { text, wordCount, chapterTitle, bookId, bookTitle, chapterIndex, totalChapters },
+      input: { text, wordCount, chapterTitle: chapterTitle ?? null, bookId: bookId ?? null, bookTitle: bookTitle ?? null, chapterIndex: chapterIndex ?? null, totalChapters: totalChapters ?? null },
       createdAt: new Date().toISOString(),
       startedAt: null,
       completedAt: null,

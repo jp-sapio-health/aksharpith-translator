@@ -33,8 +33,13 @@ export async function POST(req: NextRequest) {
       return Response.json({ error: `Section too long (${wordCount.toLocaleString()} words). Maximum is 50,000.` }, { status: 400 });
     }
 
+    // Estimate chunks: pipeline splits at ~500 word boundaries
+    const estimatedChunks = Math.ceil(wordCount / 500);
+    const mode = estimatedChunks > 2 ? 'local' : 'cloud';
+
     const jobRef = await adminDb.collection('jobs').add({
       status: 'pending',
+      mode,
       uid: authUser.uid,
       email: authUser.email ?? '',
       input: { text, wordCount, chapterTitle: chapterTitle ?? null, bookId: bookId ?? null, bookTitle: bookTitle ?? null, chapterIndex: chapterIndex ?? null, totalChapters: totalChapters ?? null },
@@ -46,7 +51,7 @@ export async function POST(req: NextRequest) {
       result: null,
     });
 
-    return Response.json({ jobId: jobRef.id });
+    return Response.json({ jobId: jobRef.id, mode });
   } catch (err: unknown) {
     console.error('Translate POST error:', err);
     return Response.json({ error: err instanceof Error ? err.message : 'Internal server error', stack: err instanceof Error ? err.stack : undefined }, { status: 500 });

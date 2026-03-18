@@ -5,7 +5,12 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "worker": "node scripts/local-worker.mjs",
+    "worker:setup": "node scripts/worker-setup.mjs install",
+    "worker:stop": "node scripts/worker-setup.mjs uninstall",
+    "worker:status": "node scripts/worker-setup.mjs status",
+    "test:file": "node scripts/test-file.mjs"
   },
   "dependencies": {
     "@vercel/functions": "^3.4.3",

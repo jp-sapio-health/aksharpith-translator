@@ -586,6 +586,7 @@ export default function Home() {
   const [reviewPanelOpen, setReviewPanelOpen] = useState(false);
   const [reviewSectionIndex, setReviewSectionIndex] = useState(0);
   const [commentCounts, setCommentCounts] = useState<Record<number, number>>({});
+  const [processingMode, setProcessingMode] = useState<'cloud' | 'local' | null>(null);
 
   // Book mode
   const [isBookMode, setIsBookMode]     = useState(false);
@@ -714,14 +715,19 @@ export default function Home() {
       throw new Error(err);
     }
 
-    const { jobId } = await createRes.json();
-    updateStage('chunker', { status: 'running', msg: 'Job created \u2014 pipeline starting\u2026' });
+    const { jobId, mode } = await createRes.json();
+    setProcessingMode(mode ?? 'cloud');
 
-    // Step 2: Trigger pipeline (fire-and-forget — this blocks on server while pipeline runs)
-    fetch(`/api/translate/${jobId}/run`, {
-      method: 'POST',
-      headers: token ? { 'Authorization': `Bearer ${token}` } : {},
-    }).catch(() => { /* polling will detect failures */ });
+    if (mode === 'local') {
+      updateStage('chunker', { status: 'running', msg: 'Job queued — local worker processing\u2026' });
+    } else {
+      updateStage('chunker', { status: 'running', msg: 'Job created \u2014 pipeline starting\u2026' });
+      // Trigger pipeline on Vercel (fire-and-forget — blocks on server while pipeline runs)
+      fetch(`/api/translate/${jobId}/run`, {
+        method: 'POST',
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+      }).catch(() => { /* polling will detect failures */ });
+    }
 
     // Step 3: Poll for status
     let result: { output: string; avg: number; wordCount: number } | null = null;
@@ -781,6 +787,7 @@ export default function Home() {
     setCommentCounts({});
     setReviewerSummary(null);
     setEnforcerTotalFixes(0);
+    setProcessingMode(null);
     setIsRunning(true);
     setTab('pipeline');
     abortRef.current = new AbortController();
@@ -1078,6 +1085,22 @@ export default function Home() {
         <div style={{ padding: '24px 20px', display: 'flex', flexDirection: 'column', gap: 0, maxWidth: 780, margin: '0 auto', width: '100%' }}>
 
           {errorBanner}
+
+          {/* Processing mode badge */}
+          {processingMode && isRunning && (
+            <div style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6,
+              padding: '6px 12px', borderRadius: 6, fontSize: 11, fontWeight: 600,
+              letterSpacing: 1, textTransform: 'uppercase', marginBottom: 12,
+              background: processingMode === 'local' ? 'rgba(99,102,241,0.08)' : 'rgba(16,185,129,0.08)',
+              color: processingMode === 'local' ? '#6366f1' : '#10b981',
+              border: `1px solid ${processingMode === 'local' ? 'rgba(99,102,241,0.2)' : 'rgba(16,185,129,0.2)'}`,
+              fontFamily: "'Karla', sans-serif",
+            }}>
+              <span style={{ fontSize: 13 }}>{processingMode === 'local' ? '\uD83D\uDDA5' : '\u2601\uFE0F'}</span>
+              {processingMode === 'local' ? 'Local processing' : 'Cloud processing'}
+            </div>
+          )}
 
           {isBookMode && <ChapterBar chapters={bookChapters} />}
 

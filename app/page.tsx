@@ -46,8 +46,8 @@ interface ChapterResult {
 
 const INITIAL_STAGES: StageState[] = [
   { id: 'chunker',    num: '01', label: 'Chunker',    tagline: 'Splits text at paragraph and verse boundaries into \u2264500-word segments', status: 'waiting', msg: '', progress: null },
-  { id: 'translator', num: '02', label: 'Translator', tagline: 'Gujarati\u2192English with full Aksharpith style context (Opus)', status: 'waiting', msg: '', progress: null },
-  { id: 'reviewer',   num: '03', label: 'Reviewer',   tagline: '6-category weighted rubric \u2014 fidelity, terminology, verse, style, history, completeness', status: 'waiting', msg: '', progress: null },
+  { id: 'translator', num: '02', label: 'Translator', tagline: 'Gujarati\u2192English with full Aksharpith style context (Sonnet)', status: 'waiting', msg: '', progress: null },
+  { id: 'reviewer',   num: '03', label: 'Reviewer',   tagline: '6-category weighted rubric \u2014 fidelity, terminology, verse handling, style & register, historical precision, completeness', status: 'waiting', msg: '', progress: null },
   { id: 'smoother',   num: '04', label: 'Smoother',   tagline: 'Readability pass \u2014 preserves all BAPS terminology and direct quotes', status: 'waiting', msg: '', progress: null },
   { id: 'assembler',  num: '05', label: 'Assembler',  tagline: 'Structural join only \u2014 deduplicates boundaries, no rewrites', status: 'waiting', msg: '', progress: null },
   { id: 'enforcer',   num: '06', label: 'Rules Enforcer', tagline: 'Deterministic rules check \u2014 terminology, punctuation, diacritics, place names', status: 'waiting', msg: '', progress: null },
@@ -733,6 +733,7 @@ export default function Home() {
 
     // Step 3: Poll for status
     let result: { output: string; avg: number; wordCount: number } | null = null;
+    const pollStart = Date.now();
 
     while (true) {
       if (abortRef.current?.signal.aborted) throw new DOMException('Aborted', 'AbortError');
@@ -746,6 +747,11 @@ export default function Home() {
 
       if (!pollRes.ok) throw new Error(`Poll failed: HTTP ${pollRes.status}`);
       const poll = await pollRes.json();
+
+      // Warn if local job hasn't started after 15s
+      if (mode === 'local' && poll.status === 'pending' && Date.now() - pollStart > 15000) {
+        updateStage('chunker', { status: 'running', msg: 'Waiting for local worker\u2026 ensure it is running (npm run worker:status)' });
+      }
 
       // Apply progress to UI
       applyProgress(poll.progress);
@@ -797,6 +803,8 @@ export default function Home() {
 
     try {
       if (isBookMode && bookChapters.length > 0) {
+        // Reset all chapter statuses to pending for new run
+        setBookChapters(prev => prev.map(c => ({ ...c, status: 'pending' as const, output: undefined, avgScore: undefined, wordCount: undefined })));
         const bookRunId = crypto.randomUUID();
         const allOutputs: string[] = new Array(bookChapters.length).fill('');
         const chapterLines = inputText.split('\n');
@@ -1213,12 +1221,14 @@ export default function Home() {
                     {outputMeta.chunkCount} section{outputMeta.chunkCount !== 1 ? 's' : ''}
                   </span>
                   <span style={{ color: 'var(--border)' }}>\u00b7</span>
-                  <span style={{
-                    fontSize: 11, fontWeight: 600, letterSpacing: 0.5,
-                    color: outputMeta.avg >= 90 ? 'var(--green)' : outputMeta.avg >= 80 ? 'var(--amber)' : 'var(--red)',
-                  }}>
-                    {outputMeta.avg}% quality
-                  </span>
+                  {outputMeta.avg > 0 && (
+                    <span style={{
+                      fontSize: 11, fontWeight: 600, letterSpacing: 0.5,
+                      color: outputMeta.avg >= 90 ? 'var(--green)' : outputMeta.avg >= 80 ? 'var(--amber)' : 'var(--red)',
+                    }}>
+                      {outputMeta.avg}% quality
+                    </span>
+                  )}
                 </div>
                 <div style={{ display: 'flex', gap: 8 }}>
                   <button onClick={handleCopy} style={{

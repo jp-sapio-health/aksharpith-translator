@@ -425,9 +425,13 @@ export async function runPipeline(
 
     // Review
     reviews[i] = await reviewerAgent(apiKey!, chunks[i], translations[i]);
+    const chunkScoreHistory = [reviews[i].score];
+    let chunkReviewRound = 1;
     for (let round = 1; round <= MAX_REVIEW_ROUNDS && reviews[i].score < RECHECK_THRESHOLD; round++) {
       totalRechecks++;
+      chunkReviewRound++;
       reviews[i] = await reviewerAgent(apiKey!, chunks[i], reviews[i].revised);
+      chunkScoreHistory.push(reviews[i].score);
     }
     reviewDone++;
 
@@ -438,8 +442,8 @@ export async function runPipeline(
       categories: reviews[i].categories,
       pitfalls: reviews[i].pitfalls,
       issues: reviews[i].issues,
-      scoreHistory: [reviews[i].score],
-      reviewRound: totalRechecks > 0 ? 2 : 1,
+      scoreHistory: chunkScoreHistory,
+      reviewRound: chunkReviewRound,
     };
 
     chunkDataForStorage.push({

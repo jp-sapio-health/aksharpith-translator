@@ -40,15 +40,19 @@ export async function POST(
     if (update.result) mergeDoc.result = update.result;
     if (update.progress) {
       const existing = (await adminDb.collection('jobs').doc(jobId).get()).data()?.progress ?? { currentStage: '', stages: {}, chunks: [] };
-      const merged = {
-        currentStage: update.progress.currentStage ?? existing.currentStage,
-        stages: { ...existing.stages },
-        chunks: update.progress.chunks ?? existing.chunks,
-      };
+      const mergedStages: Record<string, unknown> = { ...existing.stages };
       if (update.progress.stages) {
         for (const [stage, stageData] of Object.entries(update.progress.stages)) {
-          merged.stages[stage] = { ...(merged.stages[stage] ?? {}), ...(stageData as unknown as Record<string, unknown>) };
+          mergedStages[stage] = { ...(mergedStages[stage] as Record<string, unknown> ?? {}), ...(stageData as unknown as Record<string, unknown>) };
         }
+      }
+      const merged: Record<string, unknown> = {
+        currentStage: update.progress.currentStage ?? existing.currentStage,
+        stages: mergedStages,
+        chunks: update.progress.chunks ?? existing.chunks,
+      };
+      if ((update.progress as Record<string, unknown>).commentary) {
+        merged.commentary = (update.progress as Record<string, unknown>).commentary;
       }
       mergeDoc.progress = merged;
     }

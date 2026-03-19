@@ -418,18 +418,24 @@ export async function runPipeline(
   let smootherFlagged = 0;
 
   async function processChunk(i: number) {
+    const chunkLabel = chunks.length === 1 ? '' : ` chunk ${i + 1}/${chunks.length}`;
+    const srcWords = chunks[i].split(/\s+/).length;
+
     // Translate
+    await reportProgress({ progress: { commentary: `Translating${chunkLabel} (${srcWords} words) with full Aksharpith style context\u2026` } });
     translations[i] = rulesEnforcerAgent(await translatorAgent(apiKey!, chunks[i], i, chunks.length)).text;
     translateDone++;
     chunkProgressArr[i] = { ...chunkProgressArr[i], translation: translations[i].slice(0, 300) };
 
     // Review
+    await reportProgress({ progress: { commentary: `Scoring${chunkLabel} against 6-category weighted rubric\u2026` } });
     reviews[i] = await reviewerAgent(apiKey!, chunks[i], translations[i]);
     const chunkScoreHistory = [reviews[i].score];
     let chunkReviewRound = 1;
     for (let round = 1; round <= MAX_REVIEW_ROUNDS && reviews[i].score < RECHECK_THRESHOLD; round++) {
       totalRechecks++;
       chunkReviewRound++;
+      await reportProgress({ progress: { commentary: `Re-reviewing${chunkLabel} \u2014 score ${reviews[i].score}% below ${RECHECK_THRESHOLD}% threshold, round ${chunkReviewRound}\u2026` } });
       reviews[i] = await reviewerAgent(apiKey!, chunks[i], reviews[i].revised);
       chunkScoreHistory.push(reviews[i].score);
     }
@@ -454,6 +460,7 @@ export async function runPipeline(
     });
 
     // Smooth
+    await reportProgress({ progress: { commentary: `Readability pass on${chunkLabel} \u2014 preserving terminology and direct quotes\u2026` } });
     const smoothResult = await smootherAgent(apiKey!, reviews[i].revised);
     const chunkEnforced = rulesEnforcerAgent(smoothResult.text);
     smoothedChunks[i] = chunkEnforced.text;
@@ -487,12 +494,12 @@ export async function runPipeline(
   }
 
   // ── Stage 5: Assembler (deterministic) ────────────────────────────────
-  await reportProgress({ progress: { currentStage: 'assembler', stages: { assembler: { status: 'running' } }, chunks: chunkProgressArr } });
+  await reportProgress({ progress: { currentStage: 'assembler', commentary: `Joining ${chunks.length} chunks into a single document \u2014 deduplicating boundary overlaps\u2026`, stages: { assembler: { status: 'running' } }, chunks: chunkProgressArr } });
   const assembled = assemblerAgent(smoothedChunks);
-  await reportProgress({ progress: { currentStage: 'enforcer', stages: { assembler: { status: 'done' } }, chunks: chunkProgressArr } });
+  await reportProgress({ progress: { currentStage: 'enforcer', commentary: 'Document assembled successfully', stages: { assembler: { status: 'done' } }, chunks: chunkProgressArr } });
 
   // ── Stage 6: Rules Enforcer (deterministic) ───────────────────────────
-  await reportProgress({ progress: { currentStage: 'enforcer', stages: { enforcer: { status: 'running' } }, chunks: chunkProgressArr } });
+  await reportProgress({ progress: { currentStage: 'enforcer', commentary: 'Running deterministic rules \u2014 terminology, punctuation, diacritics, place names\u2026', stages: { enforcer: { status: 'running' } }, chunks: chunkProgressArr } });
   const enforced = rulesEnforcerAgent(assembled);
   const finalText = enforced.text;
   const finalWords = finalText.trim().split(/\s+/).filter(Boolean).length;

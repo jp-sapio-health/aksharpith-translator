@@ -97,8 +97,9 @@ function wc(t: string) { return t.trim() ? t.trim().split(/\s+/).length : 0; }
 
 // ── StageCard ──────────────────────────────────────────────────────────────────
 
-function StageCard({ stage }: { stage: StageState }) {
+function StageCard({ stage, commentary }: { stage: StageState; commentary?: string | null }) {
   const s = stage.status;
+
   return (
     <div style={{
       background: s === 'running' ? 'var(--amber-bg)' : s === 'done' ? 'var(--green-bg)' : s === 'error' ? 'var(--red-bg)' : 'var(--bg-white)',
@@ -111,12 +112,17 @@ function StageCard({ stage }: { stage: StageState }) {
           <span style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 22, fontWeight: 400, color: (s === 'running' || s === 'done') ? 'var(--text)' : 'var(--text-muted)', transition: 'color 0.3s' }}>{stage.label}</span>
         </div>
         {s === 'done'    && <span style={badgeStyle('strong')}>Done</span>}
-        {s === 'running' && <span style={badgeStyle('running')}>Running <span className="spinning" style={{ marginLeft: 4 }}>◌</span></span>}
+        {s === 'running' && <span style={badgeStyle('running')}>Running <span className="spinning" style={{ marginLeft: 4 }}>{'\u25CC'}</span></span>}
         {s === 'error'   && <span style={badgeStyle('weak')}>Error</span>}
       </div>
       <div style={{ fontSize: 13, fontWeight: 300, color: 'var(--text-muted)', marginTop: 4, paddingLeft: 32, lineHeight: 1.6 }}>
         {stage.msg || stage.tagline}
       </div>
+      {s === 'running' && commentary && (
+        <div style={{ paddingLeft: 32, marginTop: 6, fontSize: 12, fontStyle: 'italic', color: 'var(--text-light)', transition: 'opacity 0.3s' }} className="fadein">
+          {commentary}
+        </div>
+      )}
       {s === 'running' && (
         <div style={{ paddingLeft: 32, marginTop: 10 }}>
           <div style={{ height: 2, background: 'var(--border)', borderRadius: 2, overflow: 'hidden' }}>
@@ -602,6 +608,7 @@ function HomeInner() {
   const [reviewSectionIndex, setReviewSectionIndex] = useState(0);
   const [commentCounts, setCommentCounts] = useState<Record<number, number>>({});
   const [processingMode, setProcessingMode] = useState<'cloud' | 'local' | null>(null);
+  const [pipelineCommentary, setPipelineCommentary] = useState<string | null>(null);
 
   // Book mode
   const [isBookMode, setIsBookMode]     = useState(false);
@@ -680,6 +687,8 @@ function HomeInner() {
     const stages = progress.stages as Record<string, Record<string, unknown>> | undefined;
     const currentStage = progress.currentStage as string | undefined;
     const pollChunks = progress.chunks as Array<Record<string, unknown>> | undefined;
+    const commentary = progress.commentary as string | undefined;
+    if (commentary) setPipelineCommentary(commentary);
 
     if (stages) {
       setStages(prev => prev.map(s => {
@@ -866,6 +875,7 @@ function HomeInner() {
     setReviewerSummary(null);
     setEnforcerTotalFixes(0);
     setProcessingMode(null);
+    setPipelineCommentary(null);
     setIsRunning(true);
     setTab('pipeline');
     abortRef.current = new AbortController();
@@ -1187,7 +1197,7 @@ function HomeInner() {
           {/* Stage cards */}
           {stages.map((stage, i) => (
             <div key={stage.id}>
-              <StageCard stage={stage} />
+              <StageCard stage={stage} commentary={stage.status === 'running' ? pipelineCommentary : null} />
               {i < stages.length - 1 && <div style={{ width: 1, height: 8, background: 'var(--border)', marginLeft: 18 }} />}
             </div>
           ))}

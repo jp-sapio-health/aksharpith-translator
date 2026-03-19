@@ -44,6 +44,7 @@ export interface ChunkProgress {
 
 export interface JobProgress {
   currentStage: string;
+  commentary?: string;
   stages: Record<string, StageProgress>;
   chunks: ChunkProgress[];
 }

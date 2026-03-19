@@ -14,7 +14,7 @@ export const maxDuration = 300;
 const MAX_FILE_SIZE  = 100 * 1024 * 1024; // 100MB (Vercel Pro)
 const MAX_CLAUDE_PDF = 32  * 1024 * 1024; // Claude API limit for PDFs
 const MAX_CLAUDE_IMG = 20  * 1024 * 1024; // Claude API limit for images
-const API_TIMEOUT_MS = 120_000;           // 120s timeout for extraction
+const API_TIMEOUT_MS = 240_000;           // 240s timeout for extraction (large PDFs)
 
 // ─── Supported image types for Claude vision ───────────────────────────────────
 
@@ -340,8 +340,10 @@ export async function POST(req: NextRequest) {
         const estimatedTokens = Math.round(buf.length / 1024 * 150);
 
         if (estimatedTokens > 150_000 && pdfPages > 1) {
-          // Too large for single Haiku call — split PDF into smaller chunks
-          const pagesPerChunk = Math.max(1, Math.floor(pdfPages * (150_000 / estimatedTokens)));
+          // Too large for single Haiku call — split PDF into smaller page chunks
+          // Conservative: max 20 pages per chunk to stay well under 200k token limit
+          const calcPages = Math.max(1, Math.floor(pdfPages * (120_000 / estimatedTokens)));
+          const pagesPerChunk = Math.min(calcPages, 20);
           console.log(`PDF too large (${pdfPages} pages, ~${Math.round(estimatedTokens / 1000)}k tokens). Splitting into ${Math.ceil(pdfPages / pagesPerChunk)} chunks of ${pagesPerChunk} pages.`);
 
           const pdfChunks = await splitPdfIntoChunks(buf, pagesPerChunk);

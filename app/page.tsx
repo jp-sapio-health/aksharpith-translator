@@ -179,14 +179,37 @@ function fileTypeLabel(name: string): string {
 
 type UploadPhase = 'idle' | 'uploading' | 'processing' | 'done' | 'error';
 
+const EXTRACTION_STEPS: Array<{ label: string; detail: string }> = [
+  { label: 'Reading document structure', detail: 'Scanning pages and identifying text layers\u2026' },
+  { label: 'Extracting text content', detail: 'Pulling text from each page while preserving Gujarati Unicode\u2026' },
+  { label: 'Detecting chapters', detail: 'Identifying chapter headings and table of contents\u2026' },
+  { label: 'Analysing structure', detail: 'Mapping paragraph boundaries, verses, and section breaks\u2026' },
+  { label: 'Preparing for translation', detail: 'Validating extracted text and building section index\u2026' },
+];
+
 function FileUpload({ onExtracted, disabled, getToken }: { onExtracted: (text: string, filename: string, chapters: Array<{ title: string; startLine: number }> | null) => void; disabled: boolean; getToken: () => Promise<string | null> }) {
   const [dragging, setDragging]           = useState(false);
   const [selectedFile, setSelectedFile]   = useState<File | null>(null);
   const [phase, setPhase]                 = useState<UploadPhase>('idle');
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [extractionStep, setExtractionStep] = useState(0);
   const [error, setError]                 = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const xhrRef   = useRef<XMLHttpRequest | null>(null);
+  const extractionTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Advance extraction step captions while processing
+  useEffect(() => {
+    if (phase === 'processing') {
+      setExtractionStep(0);
+      extractionTimerRef.current = setInterval(() => {
+        setExtractionStep(prev => Math.min(prev + 1, EXTRACTION_STEPS.length - 1));
+      }, 4000);
+      return () => { if (extractionTimerRef.current) clearInterval(extractionTimerRef.current); };
+    } else {
+      if (extractionTimerRef.current) clearInterval(extractionTimerRef.current);
+    }
+  }, [phase]);
 
   const startUpload = async (file: File) => {
     setSelectedFile(file);
@@ -312,11 +335,24 @@ function FileUpload({ onExtracted, disabled, getToken }: { onExtracted: (text: s
             )}
 
             {phase === 'processing' && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span className="spinning" style={{ color: 'var(--amber)' }}>◌</span>
-                <div>
-                  <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-muted)' }}>Extracting text from document…</div>
-                  <div style={{ fontSize: 11, fontWeight: 300, color: 'var(--text-light)', marginTop: 2 }}>Extracting text, preserving Gujarati Unicode and structure</div>
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                  <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-muted)' }}>
+                    {EXTRACTION_STEPS[extractionStep]?.label ?? 'Processing\u2026'}
+                  </span>
+                  <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--amber)' }}>
+                    {Math.round(((extractionStep + 1) / EXTRACTION_STEPS.length) * 100)}%
+                  </span>
+                </div>
+                <div style={{ height: 4, background: 'var(--border)', borderRadius: 2, marginBottom: 8 }}>
+                  <div style={{
+                    height: '100%', background: 'var(--amber)', borderRadius: 2,
+                    width: `${((extractionStep + 1) / EXTRACTION_STEPS.length) * 100}%`,
+                    transition: 'width 0.6s ease',
+                  }} />
+                </div>
+                <div style={{ fontSize: 11, fontWeight: 300, color: 'var(--text-light)', fontStyle: 'italic' }} className="fadein" key={extractionStep}>
+                  {EXTRACTION_STEPS[extractionStep]?.detail}
                 </div>
               </div>
             )}

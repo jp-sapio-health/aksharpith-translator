@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback, useEffect, Suspense } from 'react';
 import { useAuth } from '../lib/auth-context';
 import { useRouter, useSearchParams } from 'next/navigation';
 import OutputView from './components/OutputView';
@@ -563,6 +563,14 @@ function ChunkCard({ chunk, expanded, onToggle }: { chunk: ChunkData; expanded: 
 // ── Main Page ──────────────────────────────────────────────────────────────────
 
 export default function Home() {
+  return (
+    <Suspense fallback={<div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg)' }}><div style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 20, color: 'var(--text-muted)', fontStyle: 'italic' }}>Loading\u2026</div></div>}>
+      <HomeInner />
+    </Suspense>
+  );
+}
+
+function HomeInner() {
   const { user, loading, signOut, getIdToken } = useAuth();
   const router = useRouter();
   const searchParams = useSearchParams();

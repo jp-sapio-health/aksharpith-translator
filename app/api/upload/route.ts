@@ -1,5 +1,7 @@
 import https from 'node:https';
 import mammoth from 'mammoth';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const pdfParse = require('pdf-parse') as (buf: Buffer) => Promise<{ numpages: number; text: string }>;
 import { NextRequest } from 'next/server';
 import { verifyAuthToken } from '../../../lib/verify-auth';
 
@@ -73,38 +75,6 @@ function callClaudeExtractOnce(
   });
 }
 
-/**
- * Extract text from a PDF, automatically splitting into batches if too large for Haiku.
- * Rough heuristic: ~150 tokens per KB of PDF. Haiku limit is 200k tokens.
- * If estimated tokens > 180k, split into sequential batch calls.
- */
-async function callClaudeExtractPdf(
-  apiKey: string, buf: Buffer, prompt: string,
-): Promise<string> {
-  const base64 = buf.toString('base64');
-  const estimatedTokens = Math.round(buf.length / 1024 * 150);
-
-  if (estimatedTokens <= 180_000) {
-    // Small enough for a single call
-    return callClaudeExtractOnce(apiKey, base64, 'application/pdf', prompt);
-  }
-
-  // Too large — try the single call, and if it fails with prompt-too-long,
-  // we need to tell the user to use DOCX format instead (no page-range API
-  // available for base64 PDFs without a server-side PDF splitter)
-  try {
-    return await callClaudeExtractOnce(apiKey, base64, 'application/pdf', prompt);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes('prompt is too long') || msg.includes('too many tokens')) {
-      throw new Error(
-        `This PDF is too large for text extraction (estimated ${Math.round(estimatedTokens / 1000)}k tokens, limit 200k). ` +
-        `Please save the document as .docx (Word) and re-upload — DOCX extraction has no size limit.`
-      );
-    }
-    throw err;
-  }
-}
 
 // ─── HTML entity decoder ─────────────────────────────────────────────────────
 
@@ -312,14 +282,58 @@ export async function POST(req: NextRequest) {
 
     let extracted = '';
 
-    // ── PDF: Claude vision (handles multi-page natively, auto-handles large PDFs)
+    // ── PDF: try local text extraction first, fall back to Claude OCR
     if (ext === 'pdf') {
-      if (buf.length > MAX_CLAUDE_PDF) {
-        return Response.json({
-          error: `PDF too large for extraction (${(buf.length / 1024 / 1024).toFixed(1)} MB). Maximum PDF size is 32 MB. Split the PDF into smaller files.`,
-        }, { status: 400 });
+      let pdfPages = 0;
+
+      // Try local extraction (fast, no API cost, no token limit)
+      try {
+        const pdfData = await pdfParse(buf);
+        pdfPages = pdfData.numpages ?? 0;
+        const localText = pdfData.text?.trim() ?? '';
+        // Check if extracted text is valid Unicode (not garbled legacy font encoding)
+        // Garbled text has high ratio of replacement chars or control chars
+        const validUnicode = localText.length > 50 &&
+          (localText.match(/[\u0A80-\u0AFF\u0900-\u097F\u0000-\u007F]/g)?.length ?? 0) > localText.length * 0.3;
+        if (validUnicode) {
+          extracted = localText
+            .replace(/\r\n/g, '\n')
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
+        }
+      } catch {
+        // pdf-parse failed — fall through to Claude
       }
-      extracted = await callClaudeExtractPdf(apiKey, buf, PDF_PROMPT);
+
+      // If local extraction failed or garbled, use Claude OCR
+      if (!extracted) {
+        if (buf.length > MAX_CLAUDE_PDF) {
+          return Response.json({
+            error: `PDF too large for OCR extraction (${(buf.length / 1024 / 1024).toFixed(1)} MB, max 32 MB). The text uses a legacy font encoding that requires AI extraction. Try saving as DOCX first.`,
+          }, { status: 400 });
+        }
+
+        // Estimate if the PDF will exceed Haiku's 200k token limit
+        // ~150 tokens per KB for PDFs with text, ~300 for image-heavy
+        const estimatedTokens = Math.round(buf.length / 1024 * 150);
+
+        if (estimatedTokens > 180_000 && pdfPages > 0) {
+          // Too large for single call — extract in page batches
+          const PAGES_PER_BATCH = Math.max(1, Math.floor(pdfPages * (180_000 / estimatedTokens)));
+          const parts: string[] = [];
+
+          for (let startPage = 0; startPage < pdfPages; startPage += PAGES_PER_BATCH) {
+            const endPage = Math.min(startPage + PAGES_PER_BATCH, pdfPages);
+            const pagePrompt = `${PDF_PROMPT}\n\nExtract text from pages ${startPage + 1} to ${endPage} only.`;
+            const part = await callClaudeExtractOnce(apiKey, buf.toString('base64'), 'application/pdf', pagePrompt);
+            parts.push(part);
+          }
+          extracted = parts.join('\n\n');
+        } else {
+          // Single call is fine
+          extracted = await callClaudeExtractOnce(apiKey, buf.toString('base64'), 'application/pdf', PDF_PROMPT);
+        }
+      }
     }
 
     // ── Images: Claude vision OCR (PNG, JPG, WEBP, GIF)

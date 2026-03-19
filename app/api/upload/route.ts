@@ -1,5 +1,6 @@
 import https from 'node:https';
 import mammoth from 'mammoth';
+import { PDFDocument } from 'pdf-lib';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const pdfParse = require('pdf-parse') as (buf: Buffer) => Promise<{ numpages: number; text: string }>;
 import { NextRequest } from 'next/server';
@@ -24,6 +25,25 @@ const IMAGE_MEDIA: Record<string, string> = {
   gif:  'image/gif',
   webp: 'image/webp',
 };
+
+// ─── PDF page splitting ─────────────────────────────────────────────────────────
+
+async function splitPdfIntoChunks(buf: Buffer, pagesPerChunk: number): Promise<Buffer[]> {
+  const srcDoc = await PDFDocument.load(buf);
+  const totalPages = srcDoc.getPageCount();
+  const chunks: Buffer[] = [];
+
+  for (let start = 0; start < totalPages; start += pagesPerChunk) {
+    const end = Math.min(start + pagesPerChunk, totalPages);
+    const newDoc = await PDFDocument.create();
+    const pages = await newDoc.copyPages(srcDoc, Array.from({ length: end - start }, (_, i) => start + i));
+    for (const page of pages) newDoc.addPage(page);
+    const bytes = await newDoc.save();
+    chunks.push(Buffer.from(bytes));
+  }
+
+  return chunks;
+}
 
 // ─── Claude extraction (PDF + image OCR) ───────────────────────────────────────
 
@@ -316,21 +336,23 @@ export async function POST(req: NextRequest) {
           }, { status: 400 });
         }
 
-        // Estimate if the PDF will exceed Haiku's 200k token limit
-        // ~150 tokens per KB for PDFs with text, ~300 for image-heavy
+        // Estimate tokens from file size (~150 tokens/KB)
         const estimatedTokens = Math.round(buf.length / 1024 * 150);
 
-        if (estimatedTokens > 180_000 && pdfPages > 0) {
-          // Too large for single call — extract in page batches
-          const PAGES_PER_BATCH = Math.max(1, Math.floor(pdfPages * (180_000 / estimatedTokens)));
+        if (estimatedTokens > 150_000 && pdfPages > 1) {
+          // Too large for single Haiku call — split PDF into smaller chunks
+          const pagesPerChunk = Math.max(1, Math.floor(pdfPages * (150_000 / estimatedTokens)));
+          console.log(`PDF too large (${pdfPages} pages, ~${Math.round(estimatedTokens / 1000)}k tokens). Splitting into ${Math.ceil(pdfPages / pagesPerChunk)} chunks of ${pagesPerChunk} pages.`);
+
+          const pdfChunks = await splitPdfIntoChunks(buf, pagesPerChunk);
           const parts: string[] = [];
 
-          for (let startPage = 0; startPage < pdfPages; startPage += PAGES_PER_BATCH) {
-            const endPage = Math.min(startPage + PAGES_PER_BATCH, pdfPages);
-            const pagePrompt = `${PDF_PROMPT}\n\nExtract text from pages ${startPage + 1} to ${endPage} only.`;
-            const part = await callClaudeExtractOnce(apiKey, buf.toString('base64'), 'application/pdf', pagePrompt);
+          for (let i = 0; i < pdfChunks.length; i++) {
+            console.log(`Extracting PDF chunk ${i + 1}/${pdfChunks.length} (${(pdfChunks[i].length / 1024).toFixed(0)} KB)`);
+            const part = await callClaudeExtractOnce(apiKey, pdfChunks[i].toString('base64'), 'application/pdf', PDF_PROMPT);
             parts.push(part);
           }
+
           extracted = parts.join('\n\n');
         } else {
           // Single call is fine

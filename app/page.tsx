@@ -799,7 +799,7 @@ function HomeInner() {
       // Estimate: ~30s per 500-word chunk (translate + review + smooth)
       const estChunks = Math.ceil((text.trim().split(/\s+/).length) / 500);
       const estMinutes = Math.max(1, Math.round(estChunks * 30 / 60));
-      updateStage('chunker', { status: 'running', msg: `Job queued \u2014 local worker processing (~${estMinutes} min estimated)\u2026` });
+      updateStage('chunker', { status: 'running', msg: `Processing locally \u2014 estimated ${estMinutes} min for this document\u2026` });
     } else {
       updateStage('chunker', { status: 'running', msg: 'Job created \u2014 pipeline starting\u2026' });
       // Trigger pipeline on Vercel (fire-and-forget — blocks on server while pipeline runs)
@@ -828,7 +828,7 @@ function HomeInner() {
 
       // Warn if local job hasn't started after 15s
       if (mode === 'local' && poll.status === 'pending' && Date.now() - pollStart > 15000) {
-        updateStage('chunker', { status: 'running', msg: 'Waiting for local worker\u2026 ensure it is running (npm run worker:status)' });
+        updateStage('chunker', { status: 'running', msg: 'Queued for local processing \u2014 the worker will pick this up shortly\u2026' });
       }
 
       // Apply progress to UI

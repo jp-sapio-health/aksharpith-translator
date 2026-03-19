@@ -88,6 +88,7 @@ export default function HistoryPage() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [expandedChapterId, setExpandedChapterId] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<string | null>(null);
 
   useEffect(() => {
     if (!loading && !user) router.push('/login');
@@ -135,6 +136,40 @@ export default function HistoryPage() {
     const a = Object.assign(document.createElement('a'), { href: url, download: `${name}-en.txt` });
     a.click();
     URL.revokeObjectURL(url);
+  };
+
+  const handleDelete = async (id: string) => {
+    if (!confirm('Delete this translation? This cannot be undone.')) return;
+    setDeleting(id);
+    try {
+      const token = await getIdToken();
+      const res = await fetch('/api/history', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ id }),
+      });
+      if (res.ok) {
+        setTranslations(prev => prev.filter(t => t.id !== id));
+      }
+    } catch { /* ignore */ }
+    setDeleting(null);
+  };
+
+  const handleDeleteBook = async (book: BookGroup) => {
+    if (!confirm(`Delete all ${book.chapters.length} chapters of "${book.bookTitle}"? This cannot be undone.`)) return;
+    setDeleting(book.bookId);
+    try {
+      const token = await getIdToken();
+      for (const ch of book.chapters) {
+        await fetch('/api/history', {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+          body: JSON.stringify({ id: ch.id }),
+        });
+      }
+      setTranslations(prev => prev.filter(t => t.bookId !== book.bookId));
+    } catch { /* ignore */ }
+    setDeleting(null);
   };
 
   if (loading || !user) {
@@ -295,6 +330,9 @@ export default function HistoryPage() {
                           <button onClick={() => handleDownloadSingle(t)} style={{ padding: '8px 16px', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg-white)', color: 'var(--text-muted)', fontFamily: "'Karla', sans-serif", fontSize: 11, fontWeight: 600, letterSpacing: '1px', textTransform: 'uppercase', cursor: 'pointer' }}>
                             Download .txt
                           </button>
+                          <button onClick={() => handleDelete(t.id)} disabled={deleting === t.id} style={{ padding: '8px 16px', border: '1px solid var(--red-border)', borderRadius: 6, background: 'var(--red-bg)', color: 'var(--red)', fontFamily: "'Karla', sans-serif", fontSize: 11, fontWeight: 600, letterSpacing: '1px', textTransform: 'uppercase', cursor: 'pointer', marginLeft: 'auto' }}>
+                            {deleting === t.id ? 'Deleting\u2026' : 'Delete'}
+                          </button>
                         </div>
                       </div>
                     )}
@@ -346,6 +384,13 @@ export default function HistoryPage() {
                           style={{ padding: '8px 16px', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg-white)', color: 'var(--text-muted)', fontFamily: "'Karla', sans-serif", fontSize: 11, fontWeight: 600, letterSpacing: '1px', textTransform: 'uppercase', cursor: 'pointer' }}
                         >
                           Download Full Book .txt
+                        </button>
+                        <button
+                          onClick={() => handleDeleteBook(book)}
+                          disabled={deleting === book.bookId}
+                          style={{ padding: '8px 16px', border: '1px solid var(--red-border)', borderRadius: 6, background: 'var(--red-bg)', color: 'var(--red)', fontFamily: "'Karla', sans-serif", fontSize: 11, fontWeight: 600, letterSpacing: '1px', textTransform: 'uppercase', cursor: 'pointer', marginLeft: 'auto' }}
+                        >
+                          {deleting === book.bookId ? 'Deleting\u2026' : 'Delete Book'}
                         </button>
                       </div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>

@@ -1271,11 +1271,11 @@ function HomeInner() {
                   <span style={{ fontSize: 12, fontWeight: 300, color: 'var(--text-muted)' }}>
                     {outputMeta.words.toLocaleString()} words
                   </span>
-                  <span style={{ color: 'var(--border)' }}>\u00b7</span>
+                  <span style={{ color: 'var(--border)' }}>{'\u00b7'}</span>
                   <span style={{ fontSize: 12, fontWeight: 300, color: 'var(--text-muted)' }}>
                     {outputMeta.chunkCount} section{outputMeta.chunkCount !== 1 ? 's' : ''}
                   </span>
-                  <span style={{ color: 'var(--border)' }}>\u00b7</span>
+                  <span style={{ color: 'var(--border)' }}>{'\u00b7'}</span>
                   {outputMeta.avg > 0 && (
                     <span style={{
                       fontSize: 11, fontWeight: 600, letterSpacing: 0.5,

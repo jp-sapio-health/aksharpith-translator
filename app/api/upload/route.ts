@@ -338,12 +338,19 @@ export async function POST(req: NextRequest) {
           // Small enough for a single Haiku call on Vercel
           extracted = await callClaudeExtractOnce(apiKey, buf.toString('base64'), 'application/pdf', PDF_PROMPT);
         } else {
-          // Too large for Vercel — send to local worker for extraction
+          // Too large for Vercel — save file to disk, local worker picks it up
+          const { writeFileSync, mkdirSync } = await import('node:fs');
+          const { resolve: resolvePath } = await import('node:path');
           const extractionId = `extract_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+          const extractDir = resolvePath(process.cwd(), 'extractions');
+          try { mkdirSync(extractDir, { recursive: true }); } catch { /* exists */ }
+          const filePath = resolvePath(extractDir, `${extractionId}.pdf`);
+          writeFileSync(filePath, buf);
+
           await adminDb.collection('extractions').doc(extractionId).set({
             status: 'pending',
             filename: file.name,
-            fileBase64: buf.toString('base64'),
+            filePath,
             mediaType: 'application/pdf',
             pages: pdfPages,
             fileSizeBytes: buf.length,

@@ -605,7 +605,8 @@ async function pollForExtractions() {
         progress: 'Splitting PDF into page chunks...',
       }, { merge: true });
 
-      const buf = Buffer.from(data.fileBase64, 'base64');
+      const { readFileSync } = await import('node:fs');
+      const buf = data.filePath ? readFileSync(data.filePath) : Buffer.from(data.fileBase64 || '', 'base64');
       const pages = data.pages || 1;
 
       // Split into chunks of ~20 pages
@@ -680,9 +681,12 @@ Return ONLY the extracted text — no commentary, no notes, no preamble.`;
         progress: `Extracted ${wordCount.toLocaleString()} words from ${totalPages} pages`,
       }, { merge: true });
 
-      // Clean up the base64 data to save Firestore space
+      // Clean up the source file and Firestore data
+      if (data.filePath) {
+        try { const { unlinkSync } = await import('node:fs'); unlinkSync(data.filePath); } catch { /* ok */ }
+      }
       await db.collection('extractions').doc(extractionId).update({
-        fileBase64: '',
+        fileBase64: '', filePath: '',
       });
 
       console.log(`[worker] Extraction complete: ${wordCount} words, ${chapters.length} chapters`);

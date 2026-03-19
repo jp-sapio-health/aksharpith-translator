@@ -27,6 +27,7 @@ const IMAGE_MEDIA: Record<string, string> = {
 
 function callClaudeExtract(
   apiKey: string, base64: string, mediaType: string, prompt: string,
+  model = 'claude-haiku-4-5-20251001',
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const isImage = mediaType.startsWith('image/');
@@ -35,7 +36,7 @@ function callClaudeExtract(
       : { type: 'document', source: { type: 'base64', media_type: mediaType, data: base64 } };
 
     const body = JSON.stringify({
-      model:      'claude-haiku-4-5-20251001',
+      model,
       max_tokens: 16000,
       messages: [{ role: 'user', content: [contentBlock, { type: 'text', text: prompt }] }],
     });
@@ -279,14 +280,16 @@ export async function POST(req: NextRequest) {
 
     let extracted = '';
 
-    // ── PDF: Claude vision (handles multi-page natively, up to 100 pages)
+    // ── PDF: Claude vision (handles multi-page natively)
     if (ext === 'pdf') {
       if (buf.length > MAX_CLAUDE_PDF) {
         return Response.json({
           error: `PDF too large for extraction (${(buf.length / 1024 / 1024).toFixed(1)} MB). Maximum PDF size is 32 MB. Split the PDF into smaller files.`,
         }, { status: 400 });
       }
-      extracted = await callClaudeExtract(apiKey, buf.toString('base64'), 'application/pdf', PDF_PROMPT);
+      // Large PDFs (>800KB) may exceed Haiku's 200k token limit — use Sonnet
+      const pdfModel = buf.length > 800 * 1024 ? 'claude-sonnet-4-20250514' : 'claude-haiku-4-5-20251001';
+      extracted = await callClaudeExtract(apiKey, buf.toString('base64'), 'application/pdf', PDF_PROMPT, pdfModel);
     }
 
     // ── Images: Claude vision OCR (PNG, JPG, WEBP, GIF)

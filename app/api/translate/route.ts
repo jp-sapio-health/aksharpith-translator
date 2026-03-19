@@ -33,9 +33,8 @@ export async function POST(req: NextRequest) {
       return Response.json({ error: `Section too long (${wordCount.toLocaleString()} words). Maximum is 50,000.` }, { status: 400 });
     }
 
-    // Estimate chunks: pipeline splits at ~500 word boundaries
-    const estimatedChunks = Math.ceil(wordCount / 500);
-    const mode = estimatedChunks > 2 ? 'local' : 'cloud';
+    // Route to local worker for anything ≥1000 words
+    const mode = wordCount >= 1000 ? 'local' : 'cloud';
 
     const jobRef = await adminDb.collection('jobs').add({
       status: 'pending',

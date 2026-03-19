@@ -5,6 +5,7 @@ import { PDFDocument } from 'pdf-lib';
 const pdfParse = require('pdf-parse') as (buf: Buffer) => Promise<{ numpages: number; text: string }>;
 import { NextRequest } from 'next/server';
 import { verifyAuthToken } from '../../../lib/verify-auth';
+import { adminDb } from '../../../lib/firebase-admin';
 
 export const dynamic    = 'force-dynamic';
 export const maxDuration = 300;
@@ -330,35 +331,31 @@ export async function POST(req: NextRequest) {
 
       // If local extraction failed or garbled, use Claude OCR
       if (!extracted) {
-        if (buf.length > MAX_CLAUDE_PDF) {
-          return Response.json({
-            error: `PDF too large for OCR extraction (${(buf.length / 1024 / 1024).toFixed(1)} MB, max 32 MB). The text uses a legacy font encoding that requires AI extraction. Try saving as DOCX first.`,
-          }, { status: 400 });
-        }
-
         // Estimate tokens from file size (~150 tokens/KB)
         const estimatedTokens = Math.round(buf.length / 1024 * 150);
 
-        if (estimatedTokens > 150_000 && pdfPages > 1) {
-          // Too large for single Haiku call — split PDF into smaller page chunks
-          // Conservative: max 20 pages per chunk to stay well under 200k token limit
-          const calcPages = Math.max(1, Math.floor(pdfPages * (120_000 / estimatedTokens)));
-          const pagesPerChunk = Math.min(calcPages, 20);
-          console.log(`PDF too large (${pdfPages} pages, ~${Math.round(estimatedTokens / 1000)}k tokens). Splitting into ${Math.ceil(pdfPages / pagesPerChunk)} chunks of ${pagesPerChunk} pages.`);
-
-          const pdfChunks = await splitPdfIntoChunks(buf, pagesPerChunk);
-          const parts: string[] = [];
-
-          for (let i = 0; i < pdfChunks.length; i++) {
-            console.log(`Extracting PDF chunk ${i + 1}/${pdfChunks.length} (${(pdfChunks[i].length / 1024).toFixed(0)} KB)`);
-            const part = await callClaudeExtractOnce(apiKey, pdfChunks[i].toString('base64'), 'application/pdf', PDF_PROMPT);
-            parts.push(part);
-          }
-
-          extracted = parts.join('\n\n');
-        } else {
-          // Single call is fine
+        if (estimatedTokens <= 150_000 && buf.length <= MAX_CLAUDE_PDF) {
+          // Small enough for a single Haiku call on Vercel
           extracted = await callClaudeExtractOnce(apiKey, buf.toString('base64'), 'application/pdf', PDF_PROMPT);
+        } else {
+          // Too large for Vercel — send to local worker for extraction
+          const extractionId = `extract_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+          await adminDb.collection('extractions').doc(extractionId).set({
+            status: 'pending',
+            filename: file.name,
+            fileBase64: buf.toString('base64'),
+            mediaType: 'application/pdf',
+            pages: pdfPages,
+            fileSizeBytes: buf.length,
+            createdAt: new Date().toISOString(),
+          });
+          return Response.json({
+            extractionId,
+            status: 'extracting_locally',
+            filename: file.name,
+            pages: pdfPages,
+            message: `PDF is ${pdfPages} pages — sending to local worker for extraction (no timeout limits)`,
+          });
         }
       }
     }

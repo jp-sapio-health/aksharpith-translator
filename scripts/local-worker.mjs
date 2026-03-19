@@ -610,17 +610,140 @@ async function pollForJobs() {
   }
 }
 
+// ── PDF extraction for large files ───────────────────────────────────────────
+
+async function pollForExtractions() {
+  if (processing) return;
+
+  try {
+    const snapshot = await db.collection('extractions')
+      .where('status', '==', 'pending')
+      .limit(1)
+      .get();
+
+    if (snapshot.empty) return;
+
+    processing = true;
+    const doc = snapshot.docs[0];
+    const extractionId = doc.id;
+    const data = doc.data();
+
+    console.log(`\n[worker] Extracting PDF: ${data.filename} (${data.pages} pages, ${(data.fileSizeBytes / 1024 / 1024).toFixed(1)} MB)`);
+
+    try {
+      await db.collection('extractions').doc(extractionId).set({
+        status: 'running',
+        progress: 'Splitting PDF into page chunks...',
+      }, { merge: true });
+
+      const buf = Buffer.from(data.fileBase64, 'base64');
+      const pages = data.pages || 1;
+
+      // Split into chunks of ~20 pages
+      const { PDFDocument } = await import('pdf-lib');
+      const srcDoc = await PDFDocument.load(buf);
+      const totalPages = srcDoc.getPageCount();
+      const pagesPerChunk = Math.min(20, totalPages);
+      const chunks = [];
+
+      for (let start = 0; start < totalPages; start += pagesPerChunk) {
+        const end = Math.min(start + pagesPerChunk, totalPages);
+        const newDoc = await PDFDocument.create();
+        const copiedPages = await newDoc.copyPages(srcDoc, Array.from({ length: end - start }, (_, i) => start + i));
+        for (const p of copiedPages) newDoc.addPage(p);
+        const bytes = await newDoc.save();
+        chunks.push(Buffer.from(bytes));
+      }
+
+      console.log(`  Split into ${chunks.length} chunks of ~${pagesPerChunk} pages`);
+
+      // Extract text from each chunk via Claude
+      const PDF_PROMPT = `Extract ALL text from this PDF document exactly as written. Preserve:
+- Every paragraph (blank line between paragraphs)
+- All Gujarati Unicode text exactly as it appears
+- All numbers, dates, names, verses
+- Chapter/section headings (mark as "=== CHAPTER: <title> ===" on its own line)
+- Verse/kirtan lines on separate lines
+Return ONLY the extracted text — no commentary, no notes, no preamble.`;
+
+      const parts = [];
+      for (let i = 0; i < chunks.length; i++) {
+        await db.collection('extractions').doc(extractionId).set({
+          progress: `Extracting text from pages ${i * pagesPerChunk + 1}–${Math.min((i + 1) * pagesPerChunk, totalPages)} of ${totalPages}...`,
+        }, { merge: true });
+
+        console.log(`  Extracting chunk ${i + 1}/${chunks.length}...`);
+        const text = await callClaude({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 16000,
+          system: 'You are a document text extractor. Extract all text faithfully.',
+          messages: [{
+            role: 'user',
+            content: [
+              { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: chunks[i].toString('base64') } },
+              { type: 'text', text: PDF_PROMPT },
+            ],
+          }],
+        });
+        parts.push(text);
+      }
+
+      const fullText = parts.join('\n\n');
+      const wordCount = fullText.trim().split(/\s+/).filter(Boolean).length;
+
+      // Detect chapters
+      const lines = fullText.split('\n');
+      const chapterPattern = /^===\s*CHAPTER:\s*(.+?)\s*===$/i;
+      const chapters = [];
+      for (let i = 0; i < lines.length; i++) {
+        const m = lines[i].trim().match(chapterPattern);
+        if (m) chapters.push({ title: m[1], startLine: i });
+      }
+
+      await db.collection('extractions').doc(extractionId).set({
+        status: 'completed',
+        text: fullText,
+        wordCount,
+        chapters: chapters.length > 1 ? chapters : null,
+        progress: `Extracted ${wordCount.toLocaleString()} words from ${totalPages} pages`,
+      }, { merge: true });
+
+      // Clean up the base64 data to save Firestore space
+      await db.collection('extractions').doc(extractionId).update({
+        fileBase64: '',
+      });
+
+      console.log(`[worker] Extraction complete: ${wordCount} words, ${chapters.length} chapters`);
+    } catch (err) {
+      console.error(`[worker] Extraction failed:`, err.message);
+      await db.collection('extractions').doc(extractionId).set({
+        status: 'failed',
+        error: err.message || 'Extraction failed',
+      }, { merge: true });
+    } finally {
+      processing = false;
+    }
+  } catch (err) {
+    console.error('[worker] Extraction poll error:', err.message);
+  }
+}
+
 // ── Start ────────────────────────────────────────────────────────────────────
 
 console.log('[worker] Aksharpith local worker started');
-console.log(`[worker] Polling Firestore every ${POLL_INTERVAL / 1000}s for local jobs...`);
+console.log(`[worker] Polling Firestore every ${POLL_INTERVAL / 1000}s for jobs + extractions...`);
 console.log(`[worker] API key: ${API_KEY.slice(0, 12)}...`);
 
 // Initial poll
 pollForJobs();
 
-// Continuous polling
-setInterval(pollForJobs, POLL_INTERVAL);
+// Continuous polling — alternate between jobs and extractions
+let pollCycle = 0;
+setInterval(() => {
+  if (pollCycle % 2 === 0) pollForJobs();
+  else pollForExtractions();
+  pollCycle++;
+}, POLL_INTERVAL);
 
 // Keep process alive
 process.on('SIGINT', () => {

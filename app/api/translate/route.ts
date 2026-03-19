@@ -33,8 +33,8 @@ export async function POST(req: NextRequest) {
       return Response.json({ error: `Section too long (${wordCount.toLocaleString()} words). Maximum is 50,000.` }, { status: 400 });
     }
 
-    // Route to local worker for anything ≥1000 words
-    const mode = wordCount >= 1000 ? 'local' : 'cloud';
+    // All processing runs locally — no Vercel timeout limits
+    const mode = 'local' as const;
 
     const jobRef = await adminDb.collection('jobs').add({
       status: 'pending',

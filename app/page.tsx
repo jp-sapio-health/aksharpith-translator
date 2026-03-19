@@ -238,6 +238,35 @@ function FileUpload({ onExtracted, disabled, getToken }: { onExtracted: (text: s
         if (xhr.status >= 400 || data.error) {
           setError(data.error ?? `Upload failed (HTTP ${xhr.status})`);
           setPhase('error');
+        } else if (data.status === 'extracting_locally') {
+          // Large file — local worker is extracting. Poll for result.
+          setExtractionStep(1);
+          const pollExtraction = async () => {
+            const tk = await getToken();
+            const pollInterval = setInterval(async () => {
+              try {
+                const res = await fetch(`/api/extract?id=${data.extractionId}`, {
+                  headers: tk ? { Authorization: `Bearer ${tk}` } : {},
+                });
+                const poll = await res.json();
+                if (poll.progress) {
+                  // Update the extraction step caption with real progress
+                  setExtractionStep(prev => Math.min(prev + 1, EXTRACTION_STEPS.length - 1));
+                }
+                if (poll.status === 'completed') {
+                  clearInterval(pollInterval);
+                  setPhase('done');
+                  onExtracted(poll.text ?? '', data.filename ?? file.name, poll.chapters ?? null);
+                }
+                if (poll.status === 'failed') {
+                  clearInterval(pollInterval);
+                  setError(poll.error ?? 'Extraction failed');
+                  setPhase('error');
+                }
+              } catch { /* keep polling */ }
+            }, 2000);
+          };
+          pollExtraction();
         } else {
           setPhase('done');
           onExtracted(data.text ?? '', data.filename ?? file.name, data.chapters ?? null);

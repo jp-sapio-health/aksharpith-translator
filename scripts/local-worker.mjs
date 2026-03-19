@@ -233,7 +233,7 @@ async function translatorAgent(chunk, chunkIndex, totalChunks) {
   return callClaude({
     model: SONNET, max_tokens: 8192,
     system: TRANSLATOR_SYSTEM,
-    messages: [{ role: 'user', content: `Chunk ${chunkIndex + 1} of ${totalChunks}. Translate the following Gujarati text to English. Provide ONLY the translation.\n\nGUJARATI:\n${chunk}` }],
+    messages: [{ role: 'user', content: `Chunk ${chunkIndex + 1} of ${totalChunks}. Translate the following Gujarati text to English. For any verse or poetry, you MUST include the Roman transliteration in curly quotes first, then the English meaning in parentheses — both are mandatory. Provide ONLY the translated output (no preamble or notes).\n\nGUJARATI:\n${chunk}` }],
   });
 }
 

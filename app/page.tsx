@@ -4,6 +4,7 @@ import { useState, useRef, useCallback, useEffect, Suspense } from 'react';
 import { useAuth } from '../lib/auth-context';
 import { useRouter, useSearchParams } from 'next/navigation';
 import OutputView from './components/OutputView';
+import DocumentRenderer from './components/DocumentRenderer';
 import ReviewPanel from './components/ReviewPanel';
 import DownloadMenu from './components/DownloadMenu';
 import QualitySummary from './components/QualitySummary';
@@ -431,8 +432,8 @@ function ChunkCard({ chunk, expanded, onToggle }: { chunk: ChunkData; expanded: 
 
       {/* ── Collapsed preview ── */}
       {!expanded && displayText && (
-        <div style={{ padding: '10px 18px', fontSize: 13, fontWeight: 300, color: 'var(--text-muted)', lineHeight: 1.65 }}>
-          {displayText.slice(0, 160)}{displayText.length > 160 ? '…' : ''}
+        <div style={{ padding: '10px 18px', fontSize: 13, fontFamily: '"Cormorant Garamond", serif', fontWeight: 400, color: 'var(--text-muted)', lineHeight: 1.65, fontStyle: 'italic' }}>
+          {displayText.slice(0, 200)}{displayText.length > 200 ? '\u2026' : ''}
         </div>
       )}
 
@@ -549,8 +550,8 @@ function ChunkCard({ chunk, expanded, onToggle }: { chunk: ChunkData; expanded: 
           {displayText && (
             <div>
               <div style={{ ...labelStyle, marginBottom: 8 }}>Final Translation</div>
-              <div style={{ fontSize: 14, fontWeight: 300, color: 'var(--text-body)', lineHeight: 1.85, whiteSpace: 'pre-wrap', padding: '14px 16px', background: 'var(--bg)', borderRadius: 6, border: '1px solid var(--border-light)' }}>
-                {displayText}
+              <div style={{ padding: '14px 16px', background: 'var(--bg)', borderRadius: 6, border: '1px solid var(--border-light)' }}>
+                <DocumentRenderer text={displayText} compact />
               </div>
             </div>
           )}

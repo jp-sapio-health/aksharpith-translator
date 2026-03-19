@@ -707,9 +707,9 @@ function HomeInner() {
           const c = sd.completed as number ?? 0, t = sd.total as number ?? 1;
           if (status === 'running') {
             if (t === 1) { msg = 'Translating\u2026'; progressPct = null; }
-            else { msg = `Translating chunk ${c + 1} of ${t}\u2026`; progressPct = Math.round(c / t * 100); }
+            else { msg = `Translated ${c} of ${t} chunks\u2026`; progressPct = Math.round(c / t * 100); }
           }
-          if (status === 'done') { msg = t === 1 ? 'Translation complete' : 'All chunks translated'; progressPct = 100; }
+          if (status === 'done') { msg = t === 1 ? 'Translation complete' : `All ${t} chunks translated`; progressPct = 100; }
         }
         if (s.id === 'reviewer') {
           const c = sd.completed as number ?? 0, t = sd.total as number ?? 1;
@@ -718,7 +718,7 @@ function HomeInner() {
           const rechecked = sd.rechecked as number ?? 0;
           if (status === 'running') {
             if (t === 1) { msg = 'Scoring against 6-category rubric\u2026'; progressPct = null; }
-            else { msg = `Reviewed ${c} of ${t} chunks\u2026`; progressPct = Math.round(c / t * 100); }
+            else { msg = `Reviewed ${c} of ${t} chunks (avg ${avg}%)\u2026`; progressPct = Math.round(c / t * 100); }
           }
           if (status === 'done') { msg = `Review complete \u2014 ${cert}/${t} certified, avg ${avg}%${rechecked > 0 ? ` (${rechecked} re-reviewed)` : ''}`; progressPct = 100; }
         }
@@ -771,7 +771,16 @@ function HomeInner() {
   // ── Run a single section through the pipeline (polling) ────────────────────
 
   const runSection = async (text: string, chapterTitle?: string, bookId?: string, chapterIndex?: number, totalChapters?: number): Promise<{ output: string; avg: number; wordCount: number } | null> => {
-    setStages(INITIAL_STAGES);
+    // In book mode, don't reset stages between chapters — show continuous progress
+    // The chapter bar handles per-chapter tracking
+    if (!bookId) {
+      setStages(INITIAL_STAGES);
+    } else {
+      // Update all stages to show current chapter context
+      const chLabel = `Section ${(chapterIndex ?? 0) + 1}/${totalChapters ?? '?'}`;
+      setStages(prev => prev.map(s => s.status === 'done' ? { ...s, status: 'waiting' as const, msg: '', progress: null } : s));
+      updateStage('chunker', { status: 'running', msg: `${chLabel} \u2014 preparing\u2026` });
+    }
     setChunks([]);
     setExpandedChunks(new Set());
     chunkMap.current = {};

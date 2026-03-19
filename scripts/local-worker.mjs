@@ -360,16 +360,18 @@ async function runJobPipeline(jobId, jobData) {
     if (update.result) mergeDoc.result = update.result;
     if (update.progress) {
       const existing = (await db.collection('jobs').doc(jobId).get()).data()?.progress ?? { currentStage: '', stages: {}, chunks: [] };
-      const merged = {
-        currentStage: update.progress.currentStage ?? existing.currentStage,
-        stages: { ...existing.stages },
-        chunks: update.progress.chunks ?? existing.chunks,
-      };
+      const mergedStages = { ...existing.stages };
       if (update.progress.stages) {
         for (const [stage, stageData] of Object.entries(update.progress.stages)) {
-          merged.stages[stage] = { ...(merged.stages[stage] ?? {}), ...stageData };
+          mergedStages[stage] = { ...(mergedStages[stage] ?? {}), ...stageData };
         }
       }
+      const merged = {
+        currentStage: update.progress.currentStage ?? existing.currentStage,
+        stages: mergedStages,
+        chunks: update.progress.chunks ?? existing.chunks,
+      };
+      if (update.progress.commentary) merged.commentary = update.progress.commentary;
       mergeDoc.progress = merged;
     }
     await db.collection('jobs').doc(jobId).set(mergeDoc, { merge: true });

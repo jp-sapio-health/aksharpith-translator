@@ -291,10 +291,13 @@ export async function POST(req: NextRequest) {
         const pdfData = await pdfParse(buf);
         pdfPages = pdfData.numpages ?? 0;
         const localText = pdfData.text?.trim() ?? '';
-        // Check if extracted text is valid Unicode (not garbled legacy font encoding)
-        // Garbled text has high ratio of replacement chars or control chars
-        const validUnicode = localText.length > 50 &&
-          (localText.match(/[\u0A80-\u0AFF\u0900-\u097F\u0000-\u007F]/g)?.length ?? 0) > localText.length * 0.3;
+        // Check if extracted text contains actual Gujarati/Devanagari Unicode
+        // Legacy font PDFs produce Latin-looking garbage (e.g. "CëÞUÝëÜ") that passes ASCII checks
+        // Require at least 5% real Gujarati/Devanagari characters to consider it valid
+        const gujaratiChars = localText.match(/[\u0A80-\u0AFF]/g)?.length ?? 0;
+        const devanagariChars = localText.match(/[\u0900-\u097F]/g)?.length ?? 0;
+        const indicRatio = (gujaratiChars + devanagariChars) / localText.length;
+        const validUnicode = localText.length > 50 && indicRatio > 0.05;
         if (validUnicode) {
           extracted = localText
             .replace(/\r\n/g, '\n')

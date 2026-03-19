@@ -565,17 +565,24 @@ async function pollForJobs() {
   if (processing) return;
 
   try {
+    // Query by status only (auto-indexed) and filter mode in code
+    // to avoid needing a composite Firestore index
     const snapshot = await db.collection('jobs')
-      .where('mode', '==', 'local')
       .where('status', '==', 'pending')
-      .orderBy('createdAt', 'asc')
-      .limit(1)
+      .limit(10)
       .get();
 
     if (snapshot.empty) return;
 
+    // Find the oldest local job
+    const localDocs = snapshot.docs
+      .filter(d => d.data().mode === 'local')
+      .sort((a, b) => (a.data().createdAt ?? '').localeCompare(b.data().createdAt ?? ''));
+
+    if (localDocs.length === 0) return;
+
     processing = true;
-    const doc = snapshot.docs[0];
+    const doc = localDocs[0];
     const jobId = doc.id;
     const jobData = doc.data();
 

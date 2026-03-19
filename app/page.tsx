@@ -2,7 +2,7 @@
 
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { useAuth } from '../lib/auth-context';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import OutputView from './components/OutputView';
 import ReviewPanel from './components/ReviewPanel';
 import DownloadMenu from './components/DownloadMenu';
@@ -565,6 +565,7 @@ function ChunkCard({ chunk, expanded, onToggle }: { chunk: ChunkData; expanded: 
 export default function Home() {
   const { user, loading, signOut, getIdToken } = useAuth();
   const router = useRouter();
+  const searchParams = useSearchParams();
 
   const [tab, setTab]             = useState<Tab>('input');
   const [inputMode, setInputMode] = useState<InputMode>('paste');
@@ -603,6 +604,49 @@ export default function Home() {
   useEffect(() => {
     if (!loading && !user) router.push('/login');
   }, [user, loading, router]);
+
+  // Load translation from history when ?view=<translationId> is present
+  useEffect(() => {
+    const viewId = searchParams.get('view');
+    if (!viewId || !user) return;
+    (async () => {
+      const token = await getIdToken();
+      if (!token) return;
+      try {
+        const res = await fetch('/api/history', { headers: { Authorization: `Bearer ${token}` } });
+        if (!res.ok) return;
+        const data = await res.json();
+        const translations = data.translations as Array<{ id: string; output: string; avgScore: number; outputWordCount: number; chapterTitle: string | null; bookTitle: string | null; bookId: string | null }>;
+        if (!translations) return;
+
+        const bookId = searchParams.get('book');
+        if (bookId) {
+          // Load full book
+          const bookChaps = translations.filter(t => t.bookId === bookId).sort((a, b) => ((a as Record<string, unknown>).chapterIndex as number ?? 0) - ((b as Record<string, unknown>).chapterIndex as number ?? 0));
+          if (bookChaps.length > 0) {
+            const combined = bookChaps.map(c => c.output).join('\n\n');
+            setOutput(combined);
+            setOutputMeta({ words: wc(combined), chunkCount: bookChaps.length, avg: Math.round(bookChaps.reduce((s, c) => s + c.avgScore, 0) / bookChaps.length) });
+            setTranslationId(bookChaps[0].id);
+            setUploadedFilename(bookChaps[0].bookTitle ?? '');
+            setTab('output');
+          }
+        } else {
+          // Load single translation
+          const t = translations.find(t => t.id === viewId);
+          if (t) {
+            setOutput(t.output);
+            setOutputMeta({ words: t.outputWordCount, chunkCount: 1, avg: t.avgScore });
+            setTranslationId(t.id);
+            setUploadedFilename(t.chapterTitle ?? t.bookTitle ?? '');
+            setTab('output');
+          }
+        }
+        // Clear the query param without reload
+        window.history.replaceState({}, '', '/');
+      } catch { /* ignore */ }
+    })();
+  }, [searchParams, user, getIdToken]);
 
   const updateStage = useCallback((id: string, updates: Partial<StageState>) => {
     setStages(prev => prev.map(s => s.id === id ? { ...s, ...updates } : s));
@@ -721,7 +765,10 @@ export default function Home() {
     setProcessingMode(prev => mode === 'local' ? 'local' : (prev ?? mode ?? 'cloud'));
 
     if (mode === 'local') {
-      updateStage('chunker', { status: 'running', msg: 'Job queued — local worker processing\u2026' });
+      // Estimate: ~30s per 500-word chunk (translate + review + smooth)
+      const estChunks = Math.ceil((text.trim().split(/\s+/).length) / 500);
+      const estMinutes = Math.max(1, Math.round(estChunks * 30 / 60));
+      updateStage('chunker', { status: 'running', msg: `Job queued \u2014 local worker processing (~${estMinutes} min estimated)\u2026` });
     } else {
       updateStage('chunker', { status: 'running', msg: 'Job created \u2014 pipeline starting\u2026' });
       // Trigger pipeline on Vercel (fire-and-forget — blocks on server while pipeline runs)

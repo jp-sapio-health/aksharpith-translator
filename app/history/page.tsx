@@ -286,6 +286,9 @@ export default function HistoryPage() {
                           {t.output}
                         </div>
                         <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
+                          <button onClick={() => router.push(`/?view=${t.id}`)} style={{ padding: '8px 16px', border: '1px solid var(--text)', borderRadius: 6, background: 'var(--text)', color: 'var(--bg-white)', fontFamily: "'Karla', sans-serif", fontSize: 11, fontWeight: 600, letterSpacing: '1px', textTransform: 'uppercase', cursor: 'pointer' }}>
+                            Open
+                          </button>
                           <button onClick={() => handleCopy(t.id, t.output)} style={{ padding: '8px 16px', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg-white)', color: 'var(--text-muted)', fontFamily: "'Karla', sans-serif", fontSize: 11, fontWeight: 600, letterSpacing: '1px', textTransform: 'uppercase', cursor: 'pointer' }}>
                             {copied === t.id ? 'Copied' : 'Copy'}
                           </button>
@@ -326,6 +329,12 @@ export default function HistoryPage() {
                   {isBookExpanded && (
                     <div style={{ borderTop: '1px solid var(--border)', padding: '16px 20px' }}>
                       <div style={{ display: 'flex', gap: 10, marginBottom: 16 }}>
+                        <button
+                          onClick={() => router.push(`/?view=${book.chapters[0]?.id ?? ''}&book=${book.bookId}`)}
+                          style={{ padding: '8px 16px', border: '1px solid var(--text)', borderRadius: 6, background: 'var(--text)', color: 'var(--bg-white)', fontFamily: "'Karla', sans-serif", fontSize: 11, fontWeight: 600, letterSpacing: '1px', textTransform: 'uppercase', cursor: 'pointer' }}
+                        >
+                          Open
+                        </button>
                         <button
                           onClick={() => handleCopy(book.bookId, book.chapters.map(c => c.output).join('\n\n'))}
                           style={{ padding: '8px 16px', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg-white)', color: 'var(--text-muted)', fontFamily: "'Karla', sans-serif", fontSize: 11, fontWeight: 600, letterSpacing: '1px', textTransform: 'uppercase', cursor: 'pointer' }}

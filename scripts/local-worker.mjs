@@ -32,8 +32,8 @@ const env = {
   ...loadEnvFile(resolve(ROOT, '.env.vercel.local')),
 };
 
-const API_KEY = env.ANTHROPIC_API_KEY?.trim();
-if (!API_KEY) { console.error('No ANTHROPIC_API_KEY found in .env.local or .env.vercel.local'); process.exit(1); }
+// API key no longer required — worker uses claude CLI (Max subscription)
+const API_KEY = env.ANTHROPIC_API_KEY?.trim() ?? '';
 
 const PROJECT_ID = env.FIREBASE_PROJECT_ID || 'aksharpith-translator';
 const CLIENT_EMAIL = env.FIREBASE_CLIENT_EMAIL;
@@ -102,73 +102,41 @@ try {
 
 const { TRANSLATOR_SYSTEM, REVIEWER_SYSTEM, SMOOTHER_SYSTEM } = rulesModule;
 
-// ── Anthropic API ────────────────────────────────────────────────────────────
+// ── Claude CLI (uses Max subscription, not API credits) ─────────────────────
 
-function callClaudeOnce(params) {
+import { execFile } from 'node:child_process';
+
+const MODEL_MAP = {
+  'claude-sonnet-4-20250514': 'sonnet',
+  'claude-haiku-4-5-20251001': 'haiku',
+};
+
+function callClaude(params) {
   return new Promise((resolve, reject) => {
-    const body = JSON.stringify({
-      model: params.model, max_tokens: params.max_tokens,
-      system: [{ type: 'text', text: params.system, cache_control: { type: 'ephemeral' } }],
-      messages: params.messages,
-    });
-    const req = https.request({
-      hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
-      headers: {
-        'x-api-key': API_KEY, 'anthropic-version': '2023-06-01',
-        'anthropic-beta': 'prompt-caching-2024-07-31',
-        'content-type': 'application/json', 'content-length': Buffer.byteLength(body),
-      },
-    }, (res) => {
-      let raw = '';
-      res.on('data', c => { raw += c; });
-      res.on('end', () => {
-        if (!res.statusCode || res.statusCode >= 400) {
-          const code = res.statusCode ?? 0;
-          const err = new Error(`Anthropic API ${code}: ${raw.slice(0, 300)}`);
-          err.statusCode = code;
-          reject(err);
-          return;
-        }
-        try {
-          const data = JSON.parse(raw);
-          const text = data.content?.[0]?.text?.trim();
-          if (!text) { reject(new Error('Empty response from Anthropic API')); return; }
-          if (data.usage) {
-            const u = data.usage;
-            const cached = u.cache_read_input_tokens ?? 0;
-            const created = u.cache_creation_input_tokens ?? 0;
-            if (cached > 0 || created > 0) {
-              console.log(`  [cache] cached=${cached} created=${created} input=${u.input_tokens ?? 0} output=${u.output_tokens ?? 0}`);
-            }
-          }
-          resolve(text);
-        } catch { reject(new Error('Parse error: ' + raw.slice(0, 200))); }
-      });
-    });
-    req.setTimeout(API_TIMEOUT_MS, () => { req.destroy(); reject(new Error('Anthropic API timeout')); });
-    req.on('error', reject);
-    req.write(body);
-    req.end();
-  });
-}
+    const prompt = `${params.system}\n\n${params.messages.map(m => typeof m.content === 'string' ? m.content : m.content).join('\n')}`;
+    const model = MODEL_MAP[params.model] ?? params.model;
+    const args = ['-p', '--model', model];
 
-async function callClaude(params) {
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      return await callClaudeOnce(params);
-    } catch (err) {
-      const code = err.statusCode ?? 0;
-      const isRetryable = code === 429 || code === 500 || code === 529 || err.message === 'Anthropic API timeout';
-      if (isRetryable && attempt < MAX_RETRIES) {
-        const delay = Math.min(1000 * Math.pow(2, attempt), 8000);
-        console.log(`  Retry ${attempt + 1} after ${delay}ms (${code || err.message})`);
-        await new Promise(r => setTimeout(r, delay));
-        continue;
+    const child = execFile('claude', args, {
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: API_TIMEOUT_MS,
+      env: { ...process.env },
+    }, (err, stdout, stderr) => {
+      if (err) {
+        reject(new Error(`Claude CLI error: ${err.message}${stderr ? ' — ' + stderr.slice(0, 200) : ''}`));
+        return;
       }
-      throw err;
-    }
-  }
-  throw new Error('Max retries exceeded');
+      const text = stdout.trim();
+      if (!text) {
+        reject(new Error('Empty response from Claude CLI'));
+        return;
+      }
+      resolve(text);
+    });
+
+    child.stdin.write(prompt);
+    child.stdin.end();
+  });
 }
 
 // ── Chunker ──────────────────────────────────────────────────────────────────
@@ -673,19 +641,22 @@ Return ONLY the extracted text — no commentary, no notes, no preamble.`;
         }, { merge: true });
 
         console.log(`  Extracting chunk ${i + 1}/${chunks.length}...`);
-        const text = await callClaude({
-          model: 'claude-haiku-4-5-20251001',
-          max_tokens: 16000,
-          system: 'You are a document text extractor. Extract all text faithfully.',
-          messages: [{
-            role: 'user',
-            content: [
-              { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: chunks[i].toString('base64') } },
-              { type: 'text', text: PDF_PROMPT },
-            ],
-          }],
-        });
-        parts.push(text);
+        // Write PDF chunk to temp file for claude CLI to read
+        const { writeFileSync, unlinkSync } = await import('node:fs');
+        const { tmpdir } = await import('node:os');
+        const tmpPath = `${tmpdir()}/aksharpith-extract-${i}.pdf`;
+        writeFileSync(tmpPath, chunks[i]);
+        try {
+          const text = await callClaude({
+            model: 'claude-haiku-4-5-20251001',
+            max_tokens: 16000,
+            system: 'You are a document text extractor. Extract all text faithfully.',
+            messages: [{ role: 'user', content: `${PDF_PROMPT}\n\nThe PDF file is at: ${tmpPath}\nRead and extract ALL text from it.` }],
+          });
+          parts.push(text);
+        } finally {
+          try { unlinkSync(tmpPath); } catch { /* ok */ }
+        }
       }
 
       const fullText = parts.join('\n\n');
@@ -730,9 +701,8 @@ Return ONLY the extracted text — no commentary, no notes, no preamble.`;
 
 // ── Start ────────────────────────────────────────────────────────────────────
 
-console.log('[worker] Aksharpith local worker started');
+console.log('[worker] Aksharpith local worker started (using claude CLI — Max subscription)');
 console.log(`[worker] Polling Firestore every ${POLL_INTERVAL / 1000}s for jobs + extractions...`);
-console.log(`[worker] API key: ${API_KEY.slice(0, 12)}...`);
 
 // Initial poll
 pollForJobs();

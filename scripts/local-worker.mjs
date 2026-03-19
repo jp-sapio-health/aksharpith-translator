@@ -117,7 +117,8 @@ function callClaude(params) {
     const model = MODEL_MAP[params.model] ?? params.model;
     const args = ['-p', '--model', model];
 
-    const child = execFile('claude', args, {
+    const claudePath = '/Users/jaypatel/.local/bin/claude';
+    const child = execFile(claudePath, args, {
       maxBuffer: 10 * 1024 * 1024,
       timeout: API_TIMEOUT_MS,
       env: { ...process.env },

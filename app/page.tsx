@@ -117,10 +117,14 @@ function StageCard({ stage }: { stage: StageState }) {
       <div style={{ fontSize: 13, fontWeight: 300, color: 'var(--text-muted)', marginTop: 4, paddingLeft: 32, lineHeight: 1.6 }}>
         {stage.msg || stage.tagline}
       </div>
-      {s === 'running' && stage.progress !== null && (
+      {s === 'running' && (
         <div style={{ paddingLeft: 32, marginTop: 10 }}>
-          <div style={{ height: 1, background: 'var(--border)', borderRadius: 2 }}>
-            <div style={{ height: '100%', background: 'var(--amber)', borderRadius: 2, width: `${stage.progress}%`, transition: 'width 0.4s' }} />
+          <div style={{ height: 2, background: 'var(--border)', borderRadius: 2, overflow: 'hidden' }}>
+            {stage.progress !== null ? (
+              <div style={{ height: '100%', background: 'var(--amber)', borderRadius: 2, width: `${stage.progress}%`, transition: 'width 0.4s' }} />
+            ) : (
+              <div className="indeterminate-bar" style={{ height: '100%', background: 'var(--amber)', borderRadius: 2, width: '30%' }} />
+            )}
           </div>
         </div>
       )}
@@ -692,20 +696,29 @@ function HomeInner() {
         }
         if (s.id === 'translator') {
           const c = sd.completed as number ?? 0, t = sd.total as number ?? 1;
-          if (status === 'running') { msg = `Translating chunk ${c} of ${t}\u2026`; progressPct = Math.round(c / t * 100); }
-          if (status === 'done') { msg = 'All chunks translated'; progressPct = 100; }
+          if (status === 'running') {
+            if (t === 1) { msg = 'Translating\u2026'; progressPct = null; }
+            else { msg = `Translating chunk ${c + 1} of ${t}\u2026`; progressPct = Math.round(c / t * 100); }
+          }
+          if (status === 'done') { msg = t === 1 ? 'Translation complete' : 'All chunks translated'; progressPct = 100; }
         }
         if (s.id === 'reviewer') {
           const c = sd.completed as number ?? 0, t = sd.total as number ?? 1;
           const avg = sd.avgScore as number ?? 0;
           const cert = sd.certCount as number ?? 0;
           const rechecked = sd.rechecked as number ?? 0;
-          if (status === 'running') { msg = `Reviewed ${c} of ${t} chunks\u2026`; progressPct = Math.round(c / t * 100); }
+          if (status === 'running') {
+            if (t === 1) { msg = 'Scoring against 6-category rubric\u2026'; progressPct = null; }
+            else { msg = `Reviewed ${c} of ${t} chunks\u2026`; progressPct = Math.round(c / t * 100); }
+          }
           if (status === 'done') { msg = `Review complete \u2014 ${cert}/${t} certified, avg ${avg}%${rechecked > 0 ? ` (${rechecked} re-reviewed)` : ''}`; progressPct = 100; }
         }
         if (s.id === 'smoother') {
           const c = sd.completed as number ?? 0, t = sd.total as number ?? 1;
-          if (status === 'running') { msg = `Smoothed ${c} of ${t} chunks\u2026`; progressPct = Math.round(c / t * 100); }
+          if (status === 'running') {
+            if (t === 1) { msg = 'Applying readability pass\u2026'; progressPct = null; }
+            else { msg = `Smoothed ${c} of ${t} chunks\u2026`; progressPct = Math.round(c / t * 100); }
+          }
           if (status === 'done') { msg = 'Readability pass complete'; progressPct = 100; }
         }
         if (s.id === 'assembler') {

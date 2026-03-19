@@ -53,3 +53,9 @@ textarea, input {
 @keyframes bar-fill {
   from { width: 0%; }
 }
+
+@keyframes indeterminate {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}
+.indeterminate-bar { animation: indeterminate 1.5s ease-in-out infinite; }

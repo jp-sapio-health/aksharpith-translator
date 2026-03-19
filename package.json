@@ -10,7 +10,8 @@
     "worker:setup": "node scripts/worker-setup.mjs install",
     "worker:stop": "node scripts/worker-setup.mjs uninstall",
     "worker:status": "node scripts/worker-setup.mjs status",
-    "test:file": "node scripts/test-file.mjs"
+    "test:file": "node scripts/test-file.mjs",
+    "worker:ui": "node scripts/worker-ui.mjs"
   },
   "dependencies": {
     "@vercel/functions": "^3.4.3",

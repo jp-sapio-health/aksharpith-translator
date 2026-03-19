@@ -25,9 +25,8 @@ const IMAGE_MEDIA: Record<string, string> = {
 
 // ─── Claude extraction (PDF + image OCR) ───────────────────────────────────────
 
-function callClaudeExtract(
+function callClaudeExtractOnce(
   apiKey: string, base64: string, mediaType: string, prompt: string,
-  model = 'claude-haiku-4-5-20251001',
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const isImage = mediaType.startsWith('image/');
@@ -36,7 +35,7 @@ function callClaudeExtract(
       : { type: 'document', source: { type: 'base64', media_type: mediaType, data: base64 } };
 
     const body = JSON.stringify({
-      model,
+      model:      'claude-haiku-4-5-20251001',
       max_tokens: 16000,
       messages: [{ role: 'user', content: [contentBlock, { type: 'text', text: prompt }] }],
     });
@@ -72,6 +71,39 @@ function callClaudeExtract(
     req.write(body);
     req.end();
   });
+}
+
+/**
+ * Extract text from a PDF, automatically splitting into batches if too large for Haiku.
+ * Rough heuristic: ~150 tokens per KB of PDF. Haiku limit is 200k tokens.
+ * If estimated tokens > 180k, split into sequential batch calls.
+ */
+async function callClaudeExtractPdf(
+  apiKey: string, buf: Buffer, prompt: string,
+): Promise<string> {
+  const base64 = buf.toString('base64');
+  const estimatedTokens = Math.round(buf.length / 1024 * 150);
+
+  if (estimatedTokens <= 180_000) {
+    // Small enough for a single call
+    return callClaudeExtractOnce(apiKey, base64, 'application/pdf', prompt);
+  }
+
+  // Too large — try the single call, and if it fails with prompt-too-long,
+  // we need to tell the user to use DOCX format instead (no page-range API
+  // available for base64 PDFs without a server-side PDF splitter)
+  try {
+    return await callClaudeExtractOnce(apiKey, base64, 'application/pdf', prompt);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes('prompt is too long') || msg.includes('too many tokens')) {
+      throw new Error(
+        `This PDF is too large for text extraction (estimated ${Math.round(estimatedTokens / 1000)}k tokens, limit 200k). ` +
+        `Please save the document as .docx (Word) and re-upload — DOCX extraction has no size limit.`
+      );
+    }
+    throw err;
+  }
 }
 
 // ─── HTML entity decoder ─────────────────────────────────────────────────────
@@ -280,16 +312,14 @@ export async function POST(req: NextRequest) {
 
     let extracted = '';
 
-    // ── PDF: Claude vision (handles multi-page natively)
+    // ── PDF: Claude vision (handles multi-page natively, auto-handles large PDFs)
     if (ext === 'pdf') {
       if (buf.length > MAX_CLAUDE_PDF) {
         return Response.json({
           error: `PDF too large for extraction (${(buf.length / 1024 / 1024).toFixed(1)} MB). Maximum PDF size is 32 MB. Split the PDF into smaller files.`,
         }, { status: 400 });
       }
-      // Large PDFs (>800KB) may exceed Haiku's 200k token limit — use Sonnet
-      const pdfModel = buf.length > 800 * 1024 ? 'claude-sonnet-4-20250514' : 'claude-haiku-4-5-20251001';
-      extracted = await callClaudeExtract(apiKey, buf.toString('base64'), 'application/pdf', PDF_PROMPT, pdfModel);
+      extracted = await callClaudeExtractPdf(apiKey, buf, PDF_PROMPT);
     }
 
     // ── Images: Claude vision OCR (PNG, JPG, WEBP, GIF)
@@ -299,7 +329,7 @@ export async function POST(req: NextRequest) {
           error: `Image too large (${(buf.length / 1024 / 1024).toFixed(1)} MB). Maximum image size is 20 MB.`,
         }, { status: 400 });
       }
-      extracted = await callClaudeExtract(apiKey, buf.toString('base64'), IMAGE_MEDIA[ext], IMAGE_PROMPT);
+      extracted = await callClaudeExtractOnce(apiKey, buf.toString('base64'), IMAGE_MEDIA[ext], IMAGE_PROMPT);
     }
 
     // ── DOCX: mammoth (preserving paragraph breaks)

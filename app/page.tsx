@@ -825,7 +825,7 @@ function HomeInner() {
     while (true) {
       if (abortRef.current?.signal.aborted) throw new DOMException('Aborted', 'AbortError');
 
-      await new Promise(r => setTimeout(r, 1500));
+      await new Promise(r => setTimeout(r, 800));
 
       const pollRes = await fetch(`/api/translate/${jobId}`, {
         headers: token ? { 'Authorization': `Bearer ${token}` } : {},

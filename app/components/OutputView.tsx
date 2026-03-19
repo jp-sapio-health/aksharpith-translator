@@ -18,12 +18,7 @@ export default function OutputView({ output, onCommentClick, commentCounts }: Pr
   if (sections.length === 0) return null;
 
   return (
-    <div style={{
-      background: 'var(--bg-white)',
-      border: '1px solid var(--border)',
-      borderRadius: 'var(--radius)',
-      padding: 24,
-    }} className="fadein">
+    <div className="fadein">
       <style>{`
         .section-comment-btn { opacity: 0 !important; }
         .output-section-wrap:hover .section-comment-btn { opacity: 0.7 !important; }

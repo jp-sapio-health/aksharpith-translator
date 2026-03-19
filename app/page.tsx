@@ -582,6 +582,7 @@ export default function Home() {
   const [enforcerTotalFixes, setEnforcerTotalFixes] = useState(0);
   const [reviewerSummary, setReviewerSummary] = useState<{ avgScore: number; certifiedCount: number; totalChunks: number; categories: Array<{ id: string; weight: number; avgScore: number }>; totalDeductions: number; topIssues: string[] } | null>(null);
   const [rulesExpanded, setRulesExpanded] = useState(false);
+  const [outputExpanded, setOutputExpanded] = useState(false);
   const [translationId, setTranslationId] = useState<string | null>(null);
   const [reviewPanelOpen, setReviewPanelOpen] = useState(false);
   const [reviewSectionIndex, setReviewSectionIndex] = useState(0);
@@ -716,7 +717,8 @@ export default function Home() {
     }
 
     const { jobId, mode } = await createRes.json();
-    setProcessingMode(mode ?? 'cloud');
+    // Only escalate — once local, stays local (for book mode with mixed chapters)
+    setProcessingMode(prev => mode === 'local' ? 'local' : (prev ?? mode ?? 'cloud'));
 
     if (mode === 'local') {
       updateStage('chunker', { status: 'running', msg: 'Job queued — local worker processing\u2026' });
@@ -783,6 +785,7 @@ export default function Home() {
     setOutput('');
     setEnforcerCorrections([]);
     setRulesExpanded(false);
+    setOutputExpanded(false);
     setTranslationId(null);
     setCommentCounts({});
     setReviewerSummary(null);
@@ -1087,7 +1090,7 @@ export default function Home() {
           {errorBanner}
 
           {/* Processing mode badge */}
-          {processingMode && isRunning && (
+          {processingMode && (
             <div style={{
               display: 'inline-flex', alignItems: 'center', gap: 6,
               padding: '6px 12px', borderRadius: 6, fontSize: 11, fontWeight: 600,
@@ -1187,7 +1190,7 @@ export default function Home() {
 
       {/* ── OUTPUT TAB ── */}
       {tab === 'output' && (
-        <div style={{ padding: '24px 20px', display: 'flex', flexDirection: 'column', gap: 20, maxWidth: 780, margin: '0 auto', width: '100%' }}>
+        <div style={{ padding: '24px 20px', display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 820, margin: '0 auto', width: '100%' }}>
           {!output ? (
             <div style={{ textAlign: 'center', padding: '48px 20px' }}>
               <div style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 24, fontWeight: 300, fontStyle: 'italic', marginBottom: 8, color: 'var(--text-muted)' }}>
@@ -1199,37 +1202,133 @@ export default function Home() {
             </div>
           ) : (
             <>
-              <div>
-                <div style={{ fontFamily: '"Cormorant Garamond", serif', fontWeight: 300, fontSize: 28, color: 'var(--text)', letterSpacing: '-0.3px' }}>Final Translation</div>
-                <div style={{ fontSize: 12, fontWeight: 300, color: 'var(--text-muted)', marginTop: 4 }}>
-                  {outputMeta.words.toLocaleString()} words · {outputMeta.chunkCount} section{outputMeta.chunkCount !== 1 ? 's' : ''} · avg quality score {outputMeta.avg}%
+              {/* Toolbar row */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontSize: 12, fontWeight: 300, color: 'var(--text-muted)' }}>
+                    {outputMeta.words.toLocaleString()} words
+                  </span>
+                  <span style={{ color: 'var(--border)' }}>\u00b7</span>
+                  <span style={{ fontSize: 12, fontWeight: 300, color: 'var(--text-muted)' }}>
+                    {outputMeta.chunkCount} section{outputMeta.chunkCount !== 1 ? 's' : ''}
+                  </span>
+                  <span style={{ color: 'var(--border)' }}>\u00b7</span>
+                  <span style={{
+                    fontSize: 11, fontWeight: 600, letterSpacing: 0.5,
+                    color: outputMeta.avg >= 90 ? 'var(--green)' : outputMeta.avg >= 80 ? 'var(--amber)' : 'var(--red)',
+                  }}>
+                    {outputMeta.avg}% quality
+                  </span>
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button onClick={handleCopy} style={{
+                    padding: '8px 16px', border: '1px solid var(--border)', borderRadius: 6,
+                    background: 'var(--bg-white)', color: 'var(--text-muted)',
+                    fontFamily: "'Karla', sans-serif", fontSize: 11, fontWeight: 600,
+                    letterSpacing: '1px', textTransform: 'uppercase', cursor: 'pointer',
+                  }}>
+                    {copied ? '\u2713 Copied' : 'Copy'}
+                  </button>
+                  <DownloadMenu
+                    output={output}
+                    translationId={translationId}
+                    filename={uploadedFilename}
+                    getToken={getIdToken}
+                  />
                 </div>
               </div>
-              <div style={{ width: 48, height: 1, background: 'var(--border)' }} />
-              <OutputView
-                output={output}
-                onCommentClick={(sectionIndex) => {
-                  setReviewSectionIndex(sectionIndex);
-                  setReviewPanelOpen(true);
-                }}
-                commentCounts={commentCounts}
-              />
+
+              {/* Document page */}
+              <div style={{
+                background: '#fff',
+                borderRadius: 4,
+                boxShadow: '0 1px 4px rgba(0,0,0,0.06), 0 8px 24px rgba(0,0,0,0.04)',
+                border: '1px solid rgba(0,0,0,0.06)',
+                padding: '48px 56px 40px',
+                minHeight: 400,
+              }}>
+                {/* Document title */}
+                <div style={{ textAlign: 'center', marginBottom: 32 }}>
+                  <div style={{
+                    fontFamily: '"Cormorant Garamond", serif',
+                    fontSize: 28, fontWeight: 600, color: 'var(--text)',
+                    lineHeight: 1.3, letterSpacing: '-0.3px',
+                  }}>
+                    {uploadedFilename
+                      ? uploadedFilename.replace(/\.[^.]+$/, '').replace(/[-_]/g, ' ')
+                      : 'Translation'}
+                  </div>
+                  {isBookMode && bookChapters.length > 0 && (
+                    <div style={{
+                      fontFamily: '"Cormorant Garamond", serif',
+                      fontSize: 15, fontWeight: 400, color: 'var(--text-muted)',
+                      marginTop: 4, fontStyle: 'italic',
+                    }}>
+                      {bookChapters.length} sections \u2014 Gujarati to English
+                    </div>
+                  )}
+                  {!isBookMode && (
+                    <div style={{
+                      fontFamily: '"Cormorant Garamond", serif',
+                      fontSize: 15, fontWeight: 400, color: 'var(--text-muted)',
+                      marginTop: 4, fontStyle: 'italic',
+                    }}>
+                      Gujarati to English Translation
+                    </div>
+                  )}
+                  <div style={{ width: 60, height: 1, background: 'var(--border)', margin: '20px auto 0' }} />
+                </div>
+
+                {/* Document body — collapsible */}
+                <div style={{
+                  position: 'relative',
+                  maxHeight: outputExpanded ? 'none' : 320,
+                  overflow: 'hidden',
+                  transition: 'max-height 0.3s ease',
+                }}>
+                  <OutputView
+                    output={output}
+                    onCommentClick={(sectionIndex) => {
+                      setReviewSectionIndex(sectionIndex);
+                      setReviewPanelOpen(true);
+                    }}
+                    commentCounts={commentCounts}
+                  />
+                  {!outputExpanded && (
+                    <div style={{
+                      position: 'absolute', bottom: 0, left: 0, right: 0, height: 100,
+                      background: 'linear-gradient(transparent, #fff)',
+                      pointerEvents: 'none',
+                    }} />
+                  )}
+                </div>
+                <button
+                  onClick={() => setOutputExpanded(prev => !prev)}
+                  style={{
+                    display: 'block', width: '100%', padding: '12px 0', marginTop: 8,
+                    border: 'none', background: 'transparent', cursor: 'pointer',
+                    fontFamily: "'Karla', sans-serif", fontSize: 11, fontWeight: 600,
+                    letterSpacing: 1, textTransform: 'uppercase', color: 'var(--text-light)',
+                    transition: 'color 0.2s',
+                  }}
+                >
+                  {outputExpanded ? '\u25B2 Collapse translation' : '\u25BC Expand full translation'}
+                </button>
+
+                {/* Footer */}
+                <div style={{ marginTop: 32, paddingTop: 16, borderTop: '1px solid var(--border-light)', textAlign: 'center' }}>
+                  <span style={{ fontSize: 10, fontWeight: 500, letterSpacing: 2, textTransform: 'uppercase', color: 'var(--text-light)' }}>
+                    Aksharpith Translation Pipeline
+                  </span>
+                </div>
+              </div>
+
+              {/* Quality summary below document */}
               <QualitySummary
                 corrections={enforcerCorrections}
                 reviewerSummary={reviewerSummary}
                 totalFixes={enforcerTotalFixes}
               />
-              <div style={{ display: 'flex', gap: 10 }}>
-                <button onClick={handleCopy} style={{ flex: 1, padding: '14px 24px', border: '1px solid var(--border)', borderRadius: 'var(--radius)', background: 'var(--bg-white)', color: 'var(--text-muted)', fontFamily: "'Karla', sans-serif", fontSize: 11, fontWeight: 600, letterSpacing: '1.5px', textTransform: 'uppercase', cursor: 'pointer', transition: 'all 0.2s' }}>
-                  {copied ? 'Copied \u2713' : 'Copy Translation'}
-                </button>
-                <DownloadMenu
-                  output={output}
-                  translationId={translationId}
-                  filename={uploadedFilename}
-                  getToken={getIdToken}
-                />
-              </div>
             </>
           )}
         </div>

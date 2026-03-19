@@ -1298,44 +1298,6 @@ function HomeInner() {
             </div>
           ) : (
             <>
-              {/* Toolbar row */}
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ fontSize: 12, fontWeight: 300, color: 'var(--text-muted)' }}>
-                    {outputMeta.words.toLocaleString()} words
-                  </span>
-                  <span style={{ color: 'var(--border)' }}>{'\u00b7'}</span>
-                  <span style={{ fontSize: 12, fontWeight: 300, color: 'var(--text-muted)' }}>
-                    {outputMeta.chunkCount} section{outputMeta.chunkCount !== 1 ? 's' : ''}
-                  </span>
-                  <span style={{ color: 'var(--border)' }}>{'\u00b7'}</span>
-                  {outputMeta.avg > 0 && (
-                    <span style={{
-                      fontSize: 11, fontWeight: 600, letterSpacing: 0.5,
-                      color: outputMeta.avg >= 90 ? 'var(--green)' : outputMeta.avg >= 80 ? 'var(--amber)' : 'var(--red)',
-                    }}>
-                      {outputMeta.avg}% quality
-                    </span>
-                  )}
-                </div>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <button onClick={handleCopy} style={{
-                    padding: '8px 16px', border: '1px solid var(--border)', borderRadius: 6,
-                    background: 'var(--bg-white)', color: 'var(--text-muted)',
-                    fontFamily: "'Karla', sans-serif", fontSize: 11, fontWeight: 600,
-                    letterSpacing: '1px', textTransform: 'uppercase', cursor: 'pointer',
-                  }}>
-                    {copied ? '\u2713 Copied' : 'Copy'}
-                  </button>
-                  <DownloadMenu
-                    output={output}
-                    translationId={translationId}
-                    filename={uploadedFilename}
-                    getToken={getIdToken}
-                  />
-                </div>
-              </div>
-
               {/* Document page */}
               <div style={{
                 background: '#fff',
@@ -1427,6 +1389,46 @@ function HomeInner() {
                 reviewerSummary={reviewerSummary}
                 totalFixes={enforcerTotalFixes}
               />
+
+              {/* Actions */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontSize: 12, fontWeight: 300, color: 'var(--text-muted)' }}>
+                    {outputMeta.words.toLocaleString()} words
+                  </span>
+                  <span style={{ color: 'var(--border)' }}>{'\u00b7'}</span>
+                  <span style={{ fontSize: 12, fontWeight: 300, color: 'var(--text-muted)' }}>
+                    {outputMeta.chunkCount} section{outputMeta.chunkCount !== 1 ? 's' : ''}
+                  </span>
+                  {outputMeta.avg > 0 && (
+                    <>
+                      <span style={{ color: 'var(--border)' }}>{'\u00b7'}</span>
+                      <span style={{
+                        fontSize: 11, fontWeight: 600, letterSpacing: 0.5,
+                        color: outputMeta.avg >= 90 ? 'var(--green)' : outputMeta.avg >= 80 ? 'var(--amber)' : 'var(--red)',
+                      }}>
+                        {outputMeta.avg}% quality
+                      </span>
+                    </>
+                  )}
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button onClick={handleCopy} style={{
+                    padding: '8px 16px', border: '1px solid var(--border)', borderRadius: 6,
+                    background: 'var(--bg-white)', color: 'var(--text-muted)',
+                    fontFamily: "'Karla', sans-serif", fontSize: 11, fontWeight: 600,
+                    letterSpacing: '1px', textTransform: 'uppercase', cursor: 'pointer',
+                  }}>
+                    {copied ? '\u2713 Copied' : 'Copy'}
+                  </button>
+                  <DownloadMenu
+                    output={output}
+                    translationId={translationId}
+                    filename={uploadedFilename}
+                    getToken={getIdToken}
+                  />
+                </div>
+              </div>
             </>
           )}
         </div>

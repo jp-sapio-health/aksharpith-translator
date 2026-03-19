@@ -123,34 +123,85 @@ const SECTION_WORDS = 4000;
 
 function detectChapters(text: string): Array<{ title: string; startLine: number }> {
   const lines = text.split('\n');
-  const markerPattern   = /^===\s*CHAPTER:\s*(.+?)\s*===$/i;
-  const numberedPattern = /^(?:chapter\s+\d+[:\s]|(\d{1,2})[.)]\s+\S)/i;
-
-  const chapters: Array<{ title: string; startLine: number }> = [];
   const skip = Math.min(50, Math.floor(lines.length * 0.05));
-
-  // Guard: if skip >= lines.length, skip chapter detection
   if (skip >= lines.length) return splitByWordCount(lines, SECTION_WORDS);
 
+  // ── Strategy 1: Claude PDF extraction markers ──
+  const markerPattern = /^===\s*CHAPTER:\s*(.+?)\s*===$/i;
+  const markerChapters: Array<{ title: string; startLine: number }> = [];
   for (let i = skip; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line) continue;
+    const m = lines[i].trim().match(markerPattern);
+    if (m) markerChapters.push({ title: m[1], startLine: i });
+  }
+  if (markerChapters.length > 1) return markerChapters;
 
-    const markerMatch = line.match(markerPattern);
-    if (markerMatch) { chapters.push({ title: markerMatch[1], startLine: i }); continue; }
-
-    const numberedMatch = line.match(numberedPattern);
-    if (numberedMatch && line.split(/\s+/).length <= 12) {
-      chapters.push({ title: line.replace(/^(?:chapter\s+\d+[:\s.]|\d{1,2}[.)]\s*)/, '').trim() || line, startLine: i });
+  // ── Strategy 2: TOC-based detection ──
+  // Look for a table of contents with pattern: "N.\t<title>" on consecutive lines
+  const tocPattern = /^(\d{1,2})\.\t(.+)/;
+  const tocEntries: Array<{ num: number; title: string; tocLine: number }> = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].trim().match(tocPattern);
+    if (m) {
+      const num = parseInt(m[1], 10);
+      const title = m[2].trim();
+      // TOC entries should be roughly consecutive (within 4 lines of each other)
+      if (tocEntries.length === 0 || i - tocEntries[tocEntries.length - 1].tocLine < 8) {
+        tocEntries.push({ num, title, tocLine: i });
+      }
     }
   }
 
-  if (chapters.length > 1) {
-    const span   = chapters[chapters.length - 1].startLine - chapters[0].startLine;
-    const avgGap = span / chapters.length;
-    if (avgGap > 30) return chapters;
+  if (tocEntries.length >= 3) {
+    // Use TOC titles to find chapter starts in the body (after the TOC)
+    const tocEnd = tocEntries[tocEntries.length - 1].tocLine + 5;
+    const tocChapters: Array<{ title: string; startLine: number }> = [];
+
+    for (const entry of tocEntries) {
+      // Extract first few significant words from TOC title for matching
+      const titleWords = entry.title.replace(/[\t\d.…]+$/, '').trim().split(/\s+/).slice(0, 4).join(' ');
+      if (titleWords.length < 3) continue;
+
+      // Search body for a line containing these words (after TOC)
+      for (let i = tocEnd; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+        const prevBlank = i > 0 && !lines[i - 1].trim();
+        if (prevBlank && line.includes(titleWords)) {
+          // Verify it's not a footnote or reference (should be a heading-like line)
+          const words = line.split(/\s+/).length;
+          if (words <= 15) {
+            tocChapters.push({ title: line, startLine: i });
+            break;
+          }
+        }
+      }
+    }
+
+    if (tocChapters.length >= 3) {
+      const span = tocChapters[tocChapters.length - 1].startLine - tocChapters[0].startLine;
+      const avgGap = span / tocChapters.length;
+      if (avgGap > 20) return tocChapters;
+    }
   }
 
+  // ── Strategy 3: Numbered headings (English or Gujarati) ──
+  const numberedPattern = /^(?:chapter\s+\d+[:\s]|(\d{1,2})[.)]\s+\S)/i;
+  const numChapters: Array<{ title: string; startLine: number }> = [];
+  for (let i = skip; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    const m = line.match(numberedPattern);
+    if (m && line.split(/\s+/).length <= 12) {
+      numChapters.push({ title: line.replace(/^(?:chapter\s+\d+[:\s.]|\d{1,2}[.)]\s*)/, '').trim() || line, startLine: i });
+    }
+  }
+  if (numChapters.length > 1) {
+    const span = numChapters[numChapters.length - 1].startLine - numChapters[0].startLine;
+    const avgGap = span / numChapters.length;
+    if (avgGap > 30) return numChapters;
+  }
+
+  // ── Strategy 4: Fallback — split by word count ──
   return splitByWordCount(lines, SECTION_WORDS);
 }
 

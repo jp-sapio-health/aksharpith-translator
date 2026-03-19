@@ -126,28 +126,69 @@ console.log('');
 
 function detectChapters(text) {
   const lines = text.split('\n');
-  const markerPattern = /^===\s*CHAPTER:\s*(.+?)\s*===$/i;
-  const numberedPattern = /^(?:chapter\s+\d+[:\s]|(\d{1,2})[.)]\s+\S)/i;
-  const chapters = [];
   const skip = Math.min(50, Math.floor(lines.length * 0.05));
   if (skip >= lines.length) return [];
 
+  // Strategy 1: Claude PDF markers
+  const markerPattern = /^===\s*CHAPTER:\s*(.+?)\s*===$/i;
+  const markerCh = [];
   for (let i = skip; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line) continue;
-    const markerMatch = line.match(markerPattern);
-    if (markerMatch) { chapters.push({ title: markerMatch[1], startLine: i }); continue; }
-    const numberedMatch = line.match(numberedPattern);
-    if (numberedMatch && line.split(/\s+/).length <= 12) {
-      chapters.push({ title: line.replace(/^(?:chapter\s+\d+[:\s.]|\d{1,2}[.)]\s*)/, '').trim() || line, startLine: i });
+    const m = lines[i].trim().match(markerPattern);
+    if (m) markerCh.push({ title: m[1], startLine: i });
+  }
+  if (markerCh.length > 1) return markerCh;
+
+  // Strategy 2: TOC-based detection
+  const tocPattern = /^(\d{1,2})\.\t(.+)/;
+  const tocEntries = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].trim().match(tocPattern);
+    if (m) {
+      const num = parseInt(m[1], 10);
+      const title = m[2].trim();
+      if (tocEntries.length === 0 || i - tocEntries[tocEntries.length - 1].tocLine < 8) {
+        tocEntries.push({ num, title, tocLine: i });
+      }
+    }
+  }
+  if (tocEntries.length >= 3) {
+    const tocEnd = tocEntries[tocEntries.length - 1].tocLine + 5;
+    const tocCh = [];
+    for (const entry of tocEntries) {
+      const titleWords = entry.title.replace(/[\t\d.…]+$/, '').trim().split(/\s+/).slice(0, 4).join(' ');
+      if (titleWords.length < 3) continue;
+      for (let i = tocEnd; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+        const prevBlank = i > 0 && !lines[i - 1].trim();
+        if (prevBlank && line.includes(titleWords) && line.split(/\s+/).length <= 15) {
+          tocCh.push({ title: line, startLine: i });
+          break;
+        }
+      }
+    }
+    if (tocCh.length >= 3) {
+      const span = tocCh[tocCh.length - 1].startLine - tocCh[0].startLine;
+      if (span / tocCh.length > 20) return tocCh;
     }
   }
 
-  if (chapters.length > 1) {
-    const span = chapters[chapters.length - 1].startLine - chapters[0].startLine;
-    const avgGap = span / chapters.length;
-    if (avgGap > 30) return chapters;
+  // Strategy 3: Numbered headings
+  const numberedPattern = /^(?:chapter\s+\d+[:\s]|(\d{1,2})[.)]\s+\S)/i;
+  const numCh = [];
+  for (let i = skip; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    const m = line.match(numberedPattern);
+    if (m && line.split(/\s+/).length <= 12) {
+      numCh.push({ title: line.replace(/^(?:chapter\s+\d+[:\s.]|\d{1,2}[.)]\s*)/, '').trim() || line, startLine: i });
+    }
   }
+  if (numCh.length > 1) {
+    const span = numCh[numCh.length - 1].startLine - numCh[0].startLine;
+    if (span / numCh.length > 30) return numCh;
+  }
+
   return [];
 }
 

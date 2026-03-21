@@ -665,6 +665,7 @@ function HomeInner() {
   const [copied, setCopied]       = useState(false);
   const [enforcerCorrections, setEnforcerCorrections] = useState<EnforcerCorrection[]>([]);
   const [enforcerTotalFixes, setEnforcerTotalFixes] = useState(0);
+  const [mainMenuOpen, setMainMenuOpen] = useState(false);
   const [reviewerSummary, setReviewerSummary] = useState<{ avgScore: number; certifiedCount: number; totalChunks: number; categories: Array<{ id: string; weight: number; avgScore: number }>; totalDeductions: number; topIssues: string[] } | null>(null);
   const [rulesExpanded, setRulesExpanded] = useState(false);
   const [outputExpanded, setOutputExpanded] = useState(false);
@@ -1078,14 +1079,39 @@ function HomeInner() {
           </div>
         </div>
         {user && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <span style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 300 }}>{user.email}</span>
-            <button onClick={() => router.push('/history')} style={{ fontSize: 11, fontWeight: 500, color: 'var(--text-light)', background: 'none', border: '1px solid var(--border)', borderRadius: 6, padding: '6px 12px', cursor: 'pointer', fontFamily: "'Karla', sans-serif" }}>
-              History
+          <div style={{ position: 'relative' }}>
+            <button
+              onClick={() => setMainMenuOpen(!mainMenuOpen)}
+              style={{
+                width: 32, height: 32, borderRadius: 6,
+                border: '1px solid var(--border)', background: 'var(--bg-white)',
+                cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                fontSize: 16, color: 'var(--text-light)', lineHeight: 1,
+              }}
+            >
+              &#9776;
             </button>
-            <button onClick={signOut} style={{ fontSize: 11, fontWeight: 500, color: 'var(--text-light)', background: 'none', border: '1px solid var(--border)', borderRadius: 6, padding: '6px 12px', cursor: 'pointer', fontFamily: "'Karla', sans-serif" }}>
-              Sign out
-            </button>
+            {mainMenuOpen && (
+              <>
+                <div onClick={() => setMainMenuOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 9 }} />
+                <div style={{
+                  position: 'absolute', top: 38, right: 0, zIndex: 10,
+                  background: 'var(--bg-white)', border: '1px solid var(--border)',
+                  borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,0.1)',
+                  overflow: 'hidden', minWidth: 180,
+                }}>
+                  <div style={{ padding: '10px 16px', borderBottom: '1px solid var(--border)', fontSize: 12, color: 'var(--text-muted)', fontWeight: 300 }}>
+                    {user.email}
+                  </div>
+                  <button onClick={() => { setMainMenuOpen(false); router.push('/history'); }} style={{ display: 'block', width: '100%', padding: '10px 16px', border: 'none', background: 'none', textAlign: 'left', fontFamily: "'Karla', sans-serif", fontSize: 13, color: 'var(--text-muted)', cursor: 'pointer' }}>
+                    History
+                  </button>
+                  <button onClick={() => { setMainMenuOpen(false); signOut(); }} style={{ display: 'block', width: '100%', padding: '10px 16px', border: 'none', background: 'none', textAlign: 'left', fontFamily: "'Karla', sans-serif", fontSize: 13, color: 'var(--text-muted)', cursor: 'pointer', borderTop: '1px solid var(--border)' }}>
+                    Sign out
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         )}
       </header>

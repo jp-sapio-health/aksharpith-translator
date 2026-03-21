@@ -84,6 +84,8 @@ export default function HistoryPage() {
   const router = useRouter();
   const [translations, setTranslations] = useState<Translation[]>([]);
   const [fetching, setFetching] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [expandedChapterId, setExpandedChapterId] = useState<string | null>(null);
@@ -94,24 +96,37 @@ export default function HistoryPage() {
     if (!loading && !user) router.push('/login');
   }, [user, loading, router]);
 
-  const fetchHistory = useCallback(async () => {
+  const fetchHistory = useCallback(async (cursor?: string) => {
     const token = await getIdToken();
     if (!token) return;
     try {
-      const res = await fetch('/api/history', { headers: { 'Authorization': `Bearer ${token}` } });
+      const params = new URLSearchParams();
+      if (cursor) params.set('cursor', cursor);
+      const res = await fetch(`/api/history?${params}`, { headers: { 'Authorization': `Bearer ${token}` } });
       const data = await res.json();
-      if (data.translations) setTranslations(data.translations);
-      else if (data.error) setError(data.error);
+      if (data.translations) {
+        setTranslations(prev => cursor ? [...prev, ...data.translations] : data.translations);
+        setNextCursor(data.nextCursor ?? null);
+      } else if (data.error) {
+        setError(data.error);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load history');
     } finally {
       setFetching(false);
+      setLoadingMore(false);
     }
   }, [getIdToken]);
 
   useEffect(() => {
     if (user) fetchHistory();
   }, [user, fetchHistory]);
+
+  const handleLoadMore = async () => {
+    if (!nextCursor || loadingMore) return;
+    setLoadingMore(true);
+    await fetchHistory(nextCursor);
+  };
 
   const handleCopy = async (id: string, text: string) => {
     await navigator.clipboard.writeText(text);
@@ -401,6 +416,24 @@ export default function HistoryPage() {
                 </div>
               );
             })}
+
+            {nextCursor && (
+              <button
+                onClick={handleLoadMore}
+                disabled={loadingMore}
+                style={{
+                  width: '100%', padding: '14px 24px', marginTop: 8,
+                  border: '1px solid var(--border)', borderRadius: 'var(--radius, 8px)',
+                  background: 'var(--bg-white)', color: 'var(--text-muted)',
+                  fontFamily: "'Karla', sans-serif", fontSize: 12, fontWeight: 600,
+                  letterSpacing: '1px', textTransform: 'uppercase',
+                  cursor: loadingMore ? 'not-allowed' : 'pointer',
+                  opacity: loadingMore ? 0.6 : 1,
+                }}
+              >
+                {loadingMore ? 'Loading...' : 'Load More'}
+              </button>
+            )}
           </div>
         )}
       </div>

@@ -4,24 +4,43 @@ import { adminDb } from '../../../lib/firebase-admin';
 
 export const dynamic = 'force-dynamic';
 
+const PAGE_SIZE = 20;
+
 export async function GET(req: NextRequest) {
   const authUser = await verifyAuthToken(req);
   if (!authUser) return Response.json({ error: 'Unauthorized' }, { status: 401 });
 
   try {
-    const snapshot = await adminDb
-      .collection('translations')
-      .where('uid', '==', authUser.uid)
-      .orderBy('createdAt', 'desc')
-      .limit(100)
-      .get();
+    const cursor = req.nextUrl.searchParams.get('cursor');
+    const limit = Math.min(
+      Number(req.nextUrl.searchParams.get('limit')) || PAGE_SIZE,
+      50,
+    );
 
-    const translations = snapshot.docs.map(doc => ({
+    let query = adminDb
+      .collection('translations')
+      .orderBy('createdAt', 'desc')
+      .limit(limit + 1); // fetch one extra to detect next page
+
+    if (cursor) {
+      const cursorDoc = await adminDb.collection('translations').doc(cursor).get();
+      if (cursorDoc.exists) {
+        query = query.startAfter(cursorDoc);
+      }
+    }
+
+    const snapshot = await query.get();
+    const docs = snapshot.docs;
+    const hasMore = docs.length > limit;
+    const page = hasMore ? docs.slice(0, limit) : docs;
+    const nextCursor = hasMore ? page[page.length - 1].id : null;
+
+    const translations = page.map(doc => ({
       id: doc.id,
       ...doc.data(),
     }));
 
-    return Response.json({ translations });
+    return Response.json({ translations, nextCursor });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error('History fetch error:', msg);

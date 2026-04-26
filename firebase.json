@@ -5,5 +5,8 @@
       "npm --prefix functions run prebuild",
       "npm --prefix functions run build"
     ]
+  },
+  "firestore": {
+    "rules": "firestore.rules"
   }
 }

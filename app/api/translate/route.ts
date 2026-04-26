@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { verifyAuthToken } from '../../../lib/verify-auth';
 import { adminDb } from '../../../lib/firebase-admin';
+import { checkRateLimit } from '../../../lib/rate-limit';
 
 export const dynamic = 'force-dynamic';
 
@@ -9,6 +10,14 @@ export async function POST(req: NextRequest) {
     const authUser = await verifyAuthToken(req);
     if (!authUser) {
       return Response.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    const rl = checkRateLimit(`translate:${authUser.uid}`);
+    if (!rl.allowed) {
+      return Response.json(
+        { error: 'Rate limit exceeded', retryAfterSeconds: rl.retryAfterSeconds },
+        { status: 429, headers: { 'Retry-After': String(rl.retryAfterSeconds) } }
+      );
     }
 
     const body = await req.json().catch(() => null);
@@ -53,6 +62,12 @@ export async function POST(req: NextRequest) {
     return Response.json({ jobId: jobRef.id, mode });
   } catch (err: unknown) {
     console.error('Translate POST error:', err);
-    return Response.json({ error: err instanceof Error ? err.message : 'Internal server error', stack: err instanceof Error ? err.stack : undefined }, { status: 500 });
+    const isDev = process.env.NODE_ENV !== 'production';
+    return Response.json(
+      isDev
+        ? { error: err instanceof Error ? err.message : 'Internal server error', stack: err instanceof Error ? err.stack : undefined }
+        : { error: 'Internal server error' },
+      { status: 500 }
+    );
   }
 }

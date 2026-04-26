@@ -11,7 +11,10 @@
     "worker:stop": "node scripts/worker-setup.mjs uninstall",
     "worker:status": "node scripts/worker-setup.mjs status",
     "test:file": "node scripts/test-file.mjs",
-    "worker:ui": "node scripts/worker-ui.mjs"
+    "worker:ui": "node scripts/worker-ui.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@vercel/functions": "^3.4.3",
@@ -31,6 +34,7 @@
     "@types/node": "^22",
     "@types/react": "^18",
     "@types/react-dom": "^18",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "2.1.8"
   }
 }

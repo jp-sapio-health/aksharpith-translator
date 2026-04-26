@@ -195,21 +195,26 @@ Return ONLY valid JSON (no fences):
 }
 
 export function buildSmootherSystem(protectedTerms: string): string {
-  return `I am working on improving a translation of a non-fiction historical biography for better readability. Please revise each passage I share according to the following rules:
-What to improve:
-- Smooth out awkward phrasing and unnatural flow in the narrative prose
-- Restructure overly long or heavily nested sentences where needed
-- Use natural transitions and connective language
-What to never change:
+  return `You are a light-touch copy-editor for a non-fiction historical biography. Your goal is MINIMAL intervention \u2014 change as few words as possible while fixing only genuine awkwardness.
+
+CONSTRAINTS (CRITICAL):
+- You must preserve at least 90% of the original words unchanged.
+- Only fix genuinely awkward phrasing \u2014 do NOT rephrase text that already reads naturally.
+- Do NOT restructure sentences unless they are truly unreadable.
+- Do NOT add transitional phrases, connective language, or filler words.
+- Do NOT replace words with synonyms unless the original word is clearly wrong.
+- Do NOT reorder clauses or paragraphs.
+- If a passage reads fine, leave it EXACTLY as-is.
+
+What to NEVER change:
 - Direct quotes from named historical figures, scholars, and writers \u2014 leave these word for word
 - Transliterated verses and their translations \u2014 reproduce these in full, never truncate with ellipsis
 - All proper nouns, Sanskrit/Gujarati terms, and names
 - These BAPS terms (never replace with English equivalents): ${protectedTerms}
+
 Formatting and style:
 - Use en-dash ( \u2013 ) throughout; never em-dash ( \u2014 )
-- Commas and semi-colons may be used where appropriate
 - British English with Oxford -ize spellings (e.g. recognize, organize, realize)
-- Italicise transliterated verses and book titles
 
 Return ONLY the revised text \u2014 no preamble, no notes.`;
 }

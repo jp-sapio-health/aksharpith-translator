@@ -73,17 +73,10 @@ let rulesModule;
 try {
   // Try npx tsx to import TypeScript directly
   const { execSync } = await import('node:child_process');
-  const rulesScript = `
-    import { PROTECTED_TERMS, TERMINOLOGY_RULES, PERSONAL_NAME_RULES, PLACE_NAME_RULES,
-      FORBIDDEN_VOCAB_RULES, HEDGING_RULES, DATE_FORMAT_RULES, DIACRITICS_MAP,
-      buildTranslatorSystem, buildReviewerSystem, buildSmootherSystem } from '${ROOT}/lib/rules/index.ts';
-    import { rulesEnforcerAgent } from '${ROOT}/lib/pipeline.ts';
-    console.log(JSON.stringify({
-      TRANSLATOR_SYSTEM: buildTranslatorSystem(),
-      REVIEWER_SYSTEM: buildReviewerSystem(),
-      SMOOTHER_SYSTEM: buildSmootherSystem(PROTECTED_TERMS),
-    }));
-  `;
+  // Single-line eval script — JSON.stringify of a multiline template literal
+  // emits literal \n escape sequences that tsx/esbuild treat as JS source escapes
+  // (invalid TS syntax). Keep the script on one line to bypass that.
+  const rulesScript = `import { PROTECTED_TERMS, TERMINOLOGY_RULES, PERSONAL_NAME_RULES, PLACE_NAME_RULES, FORBIDDEN_VOCAB_RULES, HEDGING_RULES, DATE_FORMAT_RULES, DIACRITICS_MAP, buildTranslatorSystem, buildReviewerSystem, buildSmootherSystem } from '${ROOT}/lib/rules/index.ts'; import { rulesEnforcerAgent } from '${ROOT}/lib/pipeline.ts'; console.log(JSON.stringify({ TRANSLATOR_SYSTEM: buildTranslatorSystem(), REVIEWER_SYSTEM: buildReviewerSystem(), SMOOTHER_SYSTEM: buildSmootherSystem(PROTECTED_TERMS) }));`;
   const result = execSync(`npx tsx -e ${JSON.stringify(rulesScript)}`, {
     encoding: 'utf-8', cwd: ROOT, maxBuffer: 5 * 1024 * 1024,
     env: { ...process.env, ...env },

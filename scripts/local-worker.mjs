@@ -60,7 +60,7 @@ const SONNET = 'claude-sonnet-4-20250514';
 const BATCH = 5;
 const RECHECK_THRESHOLD = 96;
 const MAX_REVIEW_ROUNDS = 2;
-const API_TIMEOUT_MS = 180_000; // 3 min — no Vercel limits
+const API_TIMEOUT_MS = 300_000; // 5 min — generous for large chunks
 const MAX_RETRIES = 2;
 const POLL_INTERVAL = 5_000;
 
@@ -96,7 +96,7 @@ try {
   rulesModule = {
     TRANSLATOR_SYSTEM: 'You are a professional Gujarati-to-English translator for Swaminarayan religious texts. Translate faithfully, preserving meaning, verse structure, and spiritual terminology.',
     REVIEWER_SYSTEM: 'You are a translation quality reviewer. Score the translation 0-100 and provide a revised version. Return JSON with: totalScore, revised, certifiable (boolean), categories (array), pitfalls (array), issues (array).',
-    SMOOTHER_SYSTEM: 'You are an English readability editor. Make minimal changes for flow and clarity. Do NOT alter meaning, names, or religious terms. Return ONLY the revised text.',
+    SMOOTHER_SYSTEM: 'You are a light-touch copy-editor. Your goal is MINIMAL intervention — change as few words as possible, fixing only genuinely awkward phrasing. You must preserve at least 90% of the original words unchanged. Do NOT restructure sentences, add transitions, replace words with synonyms, or reorder anything. Do NOT alter meaning, names, or religious terms. If a passage reads fine, leave it EXACTLY as-is. Return ONLY the revised text.',
   };
 }
 
@@ -111,7 +111,10 @@ const MODEL_MAP = {
   'claude-haiku-4-5-20251001': 'haiku',
 };
 
-function callClaude(params) {
+const CLI_MAX_RETRIES = 2;
+const CLI_RETRY_DELAY_MS = 5_000;
+
+function callClaudeOnce(params) {
   return new Promise((resolve, reject) => {
     const prompt = `${params.system}\n\n${params.messages.map(m => typeof m.content === 'string' ? m.content : m.content).join('\n')}`;
     const model = MODEL_MAP[params.model] ?? params.model;
@@ -124,7 +127,14 @@ function callClaude(params) {
       env: { ...process.env },
     }, (err, stdout, stderr) => {
       if (err) {
-        reject(new Error(`Claude CLI error: ${err.message}${stderr ? ' — ' + stderr.slice(0, 200) : ''}`));
+        const details = [
+          err.killed ? `killed (timeout after ${API_TIMEOUT_MS / 1000}s)` : null,
+          err.code ? `exit code ${err.code}` : null,
+          err.signal ? `signal ${err.signal}` : null,
+          stderr?.trim() ? `stderr: ${stderr.trim().slice(0, 300)}` : null,
+          stdout?.trim() ? `stdout: ${stdout.trim().slice(0, 300)}` : null,
+        ].filter(Boolean).join(' | ');
+        reject(new Error(`Claude CLI error: ${details || err.message}`));
         return;
       }
       const text = stdout.trim();
@@ -138,6 +148,22 @@ function callClaude(params) {
     child.stdin.write(prompt);
     child.stdin.end();
   });
+}
+
+async function callClaude(params) {
+  let lastErr;
+  for (let attempt = 0; attempt <= CLI_MAX_RETRIES; attempt++) {
+    try {
+      return await callClaudeOnce(params);
+    } catch (err) {
+      lastErr = err;
+      console.error(`  [callClaude] attempt ${attempt + 1}/${CLI_MAX_RETRIES + 1} failed: ${err.message}`);
+      if (attempt < CLI_MAX_RETRIES) {
+        await new Promise(r => setTimeout(r, CLI_RETRY_DELAY_MS * (attempt + 1)));
+      }
+    }
+  }
+  throw lastErr;
 }
 
 // ── Chunker ──────────────────────────────────────────────────────────────────
@@ -261,13 +287,16 @@ async function reviewerAgent(original, translation) {
   }
 }
 
-function charDiffRatio(a, b) {
-  const maxLen = Math.max(a.length, b.length);
+function wordDiffRatio(a, b) {
+  const wordsA = a.split(/\s+/).filter(Boolean);
+  const wordsB = b.split(/\s+/).filter(Boolean);
+  const maxLen = Math.max(wordsA.length, wordsB.length);
   if (maxLen === 0) return 0;
-  let diffs = Math.abs(a.length - b.length);
-  const minLen = Math.min(a.length, b.length);
-  for (let i = 0; i < minLen; i++) { if (a[i] !== b[i]) diffs++; }
-  return diffs / maxLen;
+  const freq = {};
+  for (const w of wordsA) freq[w] = (freq[w] ?? 0) + 1;
+  for (const w of wordsB) freq[w] = (freq[w] ?? 0) - 1;
+  const changed = Object.values(freq).reduce((s, v) => s + Math.abs(v), 0) / 2;
+  return changed / maxLen;
 }
 
 async function smootherAgent(text) {
@@ -276,9 +305,9 @@ async function smootherAgent(text) {
     system: SMOOTHER_SYSTEM,
     messages: [{ role: 'user', content: `Perform the readability pass. Return ONLY the revised text.\n\n${text}` }],
   });
-  const diffRatio = charDiffRatio(text, smoothed);
+  const diffRatio = wordDiffRatio(text, smoothed);
   if (diffRatio > 0.15) {
-    console.warn(`  Smoother changed ${(diffRatio * 100).toFixed(1)}% (>15%). Using original.`);
+    console.warn(`  Smoother changed ${(diffRatio * 100).toFixed(1)}% of words (>15%). Using original.`);
     return { text, flagged: true };
   }
   return { text: smoothed, flagged: false };
@@ -398,13 +427,19 @@ async function runJobPipeline(jobId, jobData) {
   let totalRechecks = 0, smootherFlagged = 0;
 
   async function processChunk(i) {
+    const chunkLabel = chunks.length === 1 ? '' : ` chunk ${i + 1}/${chunks.length}`;
+    const srcWords = chunks[i].split(/\s+/).filter(Boolean).length;
+
     // Translate
+    await reportProgress({ progress: { currentStage: 'translator', commentary: `Translating${chunkLabel} (${srcWords} words) with full Aksharpith style context…`, chunks: chunkProgressArr } });
     console.log(`  [chunk ${i + 1}/${chunks.length}] Translating...`);
     translations[i] = rulesEnforcerAgent(await translatorAgent(chunks[i], i, chunks.length)).text;
     translateDone++;
     chunkProgressArr[i] = { ...chunkProgressArr[i], translation: translations[i].slice(0, 300) };
+    await reportProgress({ progress: { currentStage: 'translator', commentary: `Translated${chunkLabel} — ${translations[i].split(/\s+/).filter(Boolean).length} words output`, chunks: chunkProgressArr } });
 
     // Review
+    await reportProgress({ progress: { currentStage: 'reviewer', commentary: `Scoring${chunkLabel} against 6-category weighted rubric…`, chunks: chunkProgressArr } });
     console.log(`  [chunk ${i + 1}/${chunks.length}] Reviewing...`);
     reviews[i] = await reviewerAgent(chunks[i], translations[i]);
     const chunkScoreHistory = [reviews[i].score];
@@ -412,6 +447,7 @@ async function runJobPipeline(jobId, jobData) {
     for (let round = 1; round <= MAX_REVIEW_ROUNDS && reviews[i].score < RECHECK_THRESHOLD; round++) {
       totalRechecks++;
       chunkReviewRound++;
+      await reportProgress({ progress: { currentStage: 'reviewer', commentary: `Re-reviewing${chunkLabel} — score ${reviews[i].score}% below ${RECHECK_THRESHOLD}% threshold, round ${chunkReviewRound}…`, chunks: chunkProgressArr } });
       console.log(`  [chunk ${i + 1}/${chunks.length}] Re-review round ${chunkReviewRound} (score: ${reviews[i].score})...`);
       reviews[i] = await reviewerAgent(chunks[i], reviews[i].revised);
       chunkScoreHistory.push(reviews[i].score);
@@ -428,6 +464,7 @@ async function runJobPipeline(jobId, jobData) {
       scoreHistory: chunkScoreHistory,
       reviewRound: chunkReviewRound,
     };
+    await reportProgress({ progress: { currentStage: 'reviewer', commentary: `Reviewed${chunkLabel} — score ${reviews[i].score}%${reviews[i].certifiable ? ' (certified)' : ''}`, chunks: chunkProgressArr } });
 
     chunkDataForStorage.push({
       index: i, originalGujarati: chunks[i], translation: reviews[i].revised,
@@ -437,6 +474,7 @@ async function runJobPipeline(jobId, jobData) {
     });
 
     // Smooth
+    await reportProgress({ progress: { currentStage: 'smoother', commentary: `Readability pass on${chunkLabel} — preserving terminology and direct quotes…`, chunks: chunkProgressArr } });
     console.log(`  [chunk ${i + 1}/${chunks.length}] Smoothing...`);
     const smoothResult = await smootherAgent(reviews[i].revised);
     const chunkEnforced = rulesEnforcerAgent(smoothResult.text);
@@ -444,6 +482,7 @@ async function runJobPipeline(jobId, jobData) {
     if (smoothResult.flagged) smootherFlagged++;
     smoothDone++;
     chunkProgressArr[i] = { ...chunkProgressArr[i], flagged: smoothResult.flagged };
+    await reportProgress({ progress: { currentStage: 'smoother', commentary: `Smoothed${chunkLabel}${smoothResult.flagged ? ' (flagged — using original)' : ''}`, chunks: chunkProgressArr } });
   }
 
   // Process in batches

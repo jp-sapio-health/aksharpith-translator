@@ -279,13 +279,17 @@ async function reviewerAgent(apiKey: string, original: string, translation: stri
   }
 }
 
-function charDiffRatio(a: string, b: string): number {
-  const maxLen = Math.max(a.length, b.length);
+function wordDiffRatio(a: string, b: string): number {
+  const wordsA = a.split(/\s+/).filter(Boolean);
+  const wordsB = b.split(/\s+/).filter(Boolean);
+  const maxLen = Math.max(wordsA.length, wordsB.length);
   if (maxLen === 0) return 0;
-  let diffs = Math.abs(a.length - b.length);
-  const minLen = Math.min(a.length, b.length);
-  for (let i = 0; i < minLen; i++) { if (a[i] !== b[i]) diffs++; }
-  return diffs / maxLen;
+  // Build word frequency map and count differences
+  const freq: Record<string, number> = {};
+  for (const w of wordsA) freq[w] = (freq[w] ?? 0) + 1;
+  for (const w of wordsB) freq[w] = (freq[w] ?? 0) - 1;
+  const changed = Object.values(freq).reduce((s, v) => s + Math.abs(v), 0) / 2;
+  return changed / maxLen;
 }
 
 async function smootherAgent(apiKey: string, text: string): Promise<{ text: string; flagged: boolean }> {
@@ -294,9 +298,9 @@ async function smootherAgent(apiKey: string, text: string): Promise<{ text: stri
     system: SMOOTHER_SYSTEM,
     messages: [{ role: 'user', content: `Perform the readability pass. Return ONLY the revised text.\n\n${text}` }],
   });
-  const diffRatio = charDiffRatio(text, smoothed);
+  const diffRatio = wordDiffRatio(text, smoothed);
   if (diffRatio > 0.15) {
-    console.warn(`Smoother changed ${(diffRatio * 100).toFixed(1)}% of characters (>15%). Using original.`);
+    console.warn(`Smoother changed ${(diffRatio * 100).toFixed(1)}% of words (>15%). Using original.`);
     return { text, flagged: true };
   }
   return { text: smoothed, flagged: false };

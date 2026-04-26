@@ -892,8 +892,9 @@ function HomeInner() {
 
       await new Promise(r => setTimeout(r, 800));
 
+      const freshToken = await getIdToken();
       const pollRes = await fetch(`/api/translate/${jobId}`, {
-        headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+        headers: freshToken ? { 'Authorization': `Bearer ${freshToken}` } : {},
         signal: abortRef.current?.signal,
       });
 

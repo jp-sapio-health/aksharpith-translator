@@ -1,0 +1,54 @@
+rules_version = '2';
+
+// Aksharpith Firestore security rules.
+// Default deny. Owner-only access on user-scoped documents.
+// Server-side writes via firebase-admin SDK bypass these rules.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    // Translation jobs — created by API route, polled by worker (admin SDK).
+    // Clients only need to read their own jobs for progress/status.
+    match /jobs/{jobId} {
+      allow read: if isOwner(resource.data.uid);
+      allow create, update, delete: if false; // server only
+    }
+
+    // Translation results.
+    match /translations/{translationId} {
+      allow read: if isOwner(resource.data.uid);
+      allow create: if isOwner(request.resource.data.uid);
+      allow update: if isOwner(resource.data.uid)
+                    && request.resource.data.uid == resource.data.uid;
+      allow delete: if isOwner(resource.data.uid);
+
+      // Per-translation reviewer comments.
+      match /reviews/{reviewId} {
+        // Anyone signed in who can read the parent translation can read reviews.
+        allow read: if isSignedIn()
+                    && get(/databases/$(database)/documents/translations/$(translationId)).data.uid == request.auth.uid;
+        allow create: if isOwner(request.resource.data.uid);
+        allow update, delete: if isOwner(resource.data.uid);
+      }
+    }
+
+    // Future: editorial glossary overrides (Tier 2). Lock down by default.
+    match /config/{document=**} {
+      allow read: if isSignedIn();
+      allow write: if false;
+    }
+
+    // Catch-all: deny.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

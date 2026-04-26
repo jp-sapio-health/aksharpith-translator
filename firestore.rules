@@ -3,6 +3,7 @@ rules_version = '2';
 // Aksharpith Firestore security rules.
 // Default deny. Owner-only access on user-scoped documents.
 // Server-side writes via firebase-admin SDK bypass these rules.
+// Admins (custom claim { admin: true } set by scripts/seed-admin.mjs) read across all uids.
 
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -15,35 +16,41 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == uid;
     }
 
+    function isAdmin() {
+      return isSignedIn() && request.auth.token.admin == true;
+    }
+
     // Translation jobs — created by API route, polled by worker (admin SDK).
-    // Clients only need to read their own jobs for progress/status.
+    // Clients read their own jobs for progress/status; admins read all jobs.
     match /jobs/{jobId} {
-      allow read: if isOwner(resource.data.uid);
+      allow read: if isOwner(resource.data.uid) || isAdmin();
       allow create, update, delete: if false; // server only
     }
 
     // Translation results.
     match /translations/{translationId} {
-      allow read: if isOwner(resource.data.uid);
+      allow read: if isOwner(resource.data.uid) || isAdmin();
       allow create: if isOwner(request.resource.data.uid);
       allow update: if isOwner(resource.data.uid)
                     && request.resource.data.uid == resource.data.uid;
-      allow delete: if isOwner(resource.data.uid);
+      allow delete: if isOwner(resource.data.uid) || isAdmin();
 
       // Per-translation reviewer comments.
       match /reviews/{reviewId} {
         // Anyone signed in who can read the parent translation can read reviews.
-        allow read: if isSignedIn()
-                    && get(/databases/$(database)/documents/translations/$(translationId)).data.uid == request.auth.uid;
+        // Admins can also read.
+        allow read: if isAdmin()
+                    || (isSignedIn()
+                        && get(/databases/$(database)/documents/translations/$(translationId)).data.uid == request.auth.uid);
         allow create: if isOwner(request.resource.data.uid);
         allow update, delete: if isOwner(resource.data.uid);
       }
     }
 
-    // Future: editorial glossary overrides (Tier 2). Lock down by default.
+    // Future: editorial glossary overrides (Tier 2). Admins write, anyone signed in reads.
     match /config/{document=**} {
       allow read: if isSignedIn();
-      allow write: if false;
+      allow write: if isAdmin();
     }
 
     // Catch-all: deny.

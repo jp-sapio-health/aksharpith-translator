@@ -12,6 +12,7 @@
     "worker:status": "node scripts/worker-setup.mjs status",
     "test:file": "node scripts/test-file.mjs",
     "worker:ui": "node scripts/worker-ui.mjs",
+    "admin:seed": "node scripts/seed-admin.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"

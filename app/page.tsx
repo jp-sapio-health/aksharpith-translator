@@ -21,7 +21,7 @@ type Tab = 'input' | 'pipeline' | 'output';
 type InputMode = 'paste' | 'upload';
 
 interface StageState {
-  id: 'chunker' | 'translator' | 'reviewer' | 'smoother' | 'assembler' | 'enforcer';
+  id: 'chunker' | 'translator' | 'smoother' | 'assembler' | 'enforcer';
   num: string; label: string; tagline: string;
   status: StageStatus; msg: string; progress: number | null;
 }
@@ -30,33 +30,30 @@ interface EnforcerCorrection {
   from: string; to: string; count: number;
 }
 
-interface Reviewer1Category { id: string; name?: string; weight?: number; score?: number; pass: boolean; issues?: string[]; deductions?: string[]; }
-
+// PR 3 / PR 4 contract: the user view consumes translator self-flags, not
+// reviewer scores. Reviewer-derived fields are stripped at the API boundary
+// and only available in /admin via /api/admin/translate/[jobId].
 interface ChunkData {
   index: number; original: string;
   translation?: string;
-  reviewer1?: { categories: Reviewer1Category[]; pitfalls: string[]; score: number; certifiable: boolean };
-  score?: number; issues?: string[]; revised?: string; approved?: boolean;
-  scoreHistory?: number[];
-  reviewRound?: number;
-  reviewing?: boolean;
+  flags?: string[];
 }
 
 interface ChapterResult {
   title: string; index: number; startLine: number;
   status: 'pending' | 'running' | 'done' | 'error';
-  output?: string; avgScore?: number; wordCount?: number;
+  output?: string; wordCount?: number; flagsCount?: number;
 }
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
+// User-facing pipeline view (5 stages). The reviewer is admin-only telemetry.
 const INITIAL_STAGES: StageState[] = [
-  { id: 'chunker',    num: '01', label: 'Chunker',    tagline: 'Splits text at paragraph and verse boundaries into \u2264500-word segments', status: 'waiting', msg: '', progress: null },
-  { id: 'translator', num: '02', label: 'Translator', tagline: 'Gujarati\u2192English with full Aksharpith style context (Sonnet)', status: 'waiting', msg: '', progress: null },
-  { id: 'reviewer',   num: '03', label: 'Reviewer',   tagline: '6-category weighted rubric \u2014 fidelity, terminology, verse handling, style & register, historical precision, completeness', status: 'waiting', msg: '', progress: null },
-  { id: 'smoother',   num: '04', label: 'Smoother',   tagline: 'Readability pass \u2014 preserves all BAPS terminology and direct quotes', status: 'waiting', msg: '', progress: null },
-  { id: 'assembler',  num: '05', label: 'Assembler',  tagline: 'Structural join only \u2014 deduplicates boundaries, no rewrites', status: 'waiting', msg: '', progress: null },
-  { id: 'enforcer',   num: '06', label: 'Rules Enforcer', tagline: 'Deterministic rules check \u2014 terminology, punctuation, diacritics, place names', status: 'waiting', msg: '', progress: null },
+  { id: 'chunker',    num: '01', label: 'Chunker',    tagline: 'Splits text at paragraph and verse boundaries into ≤500-word segments', status: 'waiting', msg: '', progress: null },
+  { id: 'translator', num: '02', label: 'Translator', tagline: 'Gujarati→English with full Aksharpith style context (Sonnet)', status: 'waiting', msg: '', progress: null },
+  { id: 'smoother',   num: '03', label: 'Smoother',   tagline: 'Readability pass — preserves all BAPS terminology and direct quotes', status: 'waiting', msg: '', progress: null },
+  { id: 'assembler',  num: '04', label: 'Assembler',  tagline: 'Structural join only — deduplicates boundaries, no rewrites', status: 'waiting', msg: '', progress: null },
+  { id: 'enforcer',   num: '05', label: 'Rules Enforcer', tagline: 'Deterministic rules check — terminology, punctuation, diacritics, place names', status: 'waiting', msg: '', progress: null },
 ];
 
 const SAMPLE = `પ્રેમે પ્રગટ્યા રે સૂરજ સહજાનંદ, અધર્મ અંધારું ટાળિયું...
@@ -90,48 +87,50 @@ function badgeStyle(type: 'strong' | 'adequate' | 'weak' | 'running'): React.CSS
   };
 }
 
-function scoreTier(score: number): { label: string; type: 'strong' | 'adequate' | 'weak'; desc: string } {
-  if (score >= 90) return { label: 'Publication Ready', type: 'strong',   desc: 'Appears to meet Aksharpith publication standards \u2014 verify with editorial.' };
-  if (score >= 80) return { label: 'Strong',            type: 'strong',   desc: 'Minor issues corrected \u2014 recommended for editorial review.' };
-  if (score >= 70) return { label: 'Revised',           type: 'adequate', desc: 'Multiple corrections applied by both reviewers.' };
-  if (score >= 60) return { label: 'Needs Work',        type: 'adequate', desc: 'Significant revision was required — verify manually.' };
-  return              { label: 'Poor',             type: 'weak',     desc: 'Major issues found — consider retranslating this chunk.' };
-}
-
 function wc(t: string) { return t.trim() ? t.trim().split(/\s+/).length : 0; }
 
 // ── StageCard ──────────────────────────────────────────────────────────────────
 
 function StageCard({ stage, commentary }: { stage: StageState; commentary?: string | null }) {
   const s = stage.status;
+  const ringTone =
+    s === 'running' ? 'border-l-[oklch(0.55_0.16_75)]' :
+    s === 'done' ? 'border-l-[oklch(0.55_0.13_145)]' :
+    s === 'error' ? 'border-l-destructive' :
+    'border-l-border';
+  const labelTone = s === 'waiting' ? 'text-muted-foreground' : 'text-foreground';
+  const tagTone =
+    s === 'done' ? 'text-[oklch(0.42_0.10_145)]' :
+    s === 'running' ? 'text-[oklch(0.45_0.13_75)]' :
+    s === 'error' ? 'text-destructive' :
+    'text-muted-foreground/70';
 
   return (
-    <div style={{
-      background: s === 'running' ? 'var(--amber-bg)' : s === 'done' ? 'var(--green-bg)' : s === 'error' ? 'var(--red-bg)' : 'var(--bg-white)',
-      border: `1px solid ${s === 'running' ? 'var(--amber-border)' : s === 'done' ? 'var(--green-border)' : s === 'error' ? 'var(--red-border)' : 'var(--border)'}`,
-      borderRadius: 'var(--radius)', padding: '18px 22px', transition: 'all 0.3s',
-    }} className="fadein">
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <span style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 13, letterSpacing: 1, color: 'var(--text-light)', width: 20 }}>{stage.num}</span>
-          <span style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 22, fontWeight: 400, color: (s === 'running' || s === 'done') ? 'var(--text)' : 'var(--text-muted)', transition: 'color 0.3s' }}>{stage.label}</span>
+    <div className={cn(
+      'rounded-md border bg-paper border-l-4 transition-colors',
+      ringTone,
+    )}>
+      <div className="flex items-baseline justify-between gap-3 px-4 pt-3 sm:px-5">
+        <div className="flex items-baseline gap-3 min-w-0">
+          <span className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground/70 shrink-0">
+            {stage.num}
+          </span>
+          <span className={cn('font-serif text-lg sm:text-xl truncate', labelTone)}>
+            {stage.label}
+          </span>
         </div>
-        {s === 'done'    && <span style={badgeStyle('strong')}>Done</span>}
-        {/* No spinner — progress is told in words via the commentary line below.
-            Per docs/redesign-brief.md principle 1. */}
-        {s === 'running' && <span style={badgeStyle('running')}>Running <span className="spinning" style={{ marginLeft: 4 }}>{'\u25CC'}</span></span>}
-        {s === 'error'   && <span style={badgeStyle('weak')}>Error</span>}
+        <span className={cn('font-mono text-[10px] uppercase tracking-wider shrink-0', tagTone)}>
+          {s === 'done' ? '✓ done' : s === 'running' ? '→ running' : s === 'error' ? '✗ error' : '·'}
+        </span>
       </div>
-      <div style={{ fontSize: 13, fontWeight: 300, color: 'var(--text-muted)', marginTop: 4, paddingLeft: 32, lineHeight: 1.6 }}>
+      <p className="px-4 pb-3 sm:px-5 mt-1 pl-4 sm:pl-5 text-xs text-muted-foreground/90 leading-relaxed">
         {stage.msg || stage.tagline}
-      </div>
+      </p>
       {s === 'running' && commentary && (
-        <div style={{ paddingLeft: 32, marginTop: 6, fontSize: 12, fontStyle: 'italic', color: 'var(--text-light)' }}>
+        <p className="px-4 pb-3 sm:px-5 -mt-1 text-xs italic text-muted-foreground/80 leading-relaxed">
           {commentary}
-        </div>
+        </p>
       )}
-      {/* docs/redesign-brief.md: progress is in words, not bars. Removed the
-          indeterminate / determinate bar; the commentary line carries the signal. */}
     </div>
   );
 }
@@ -178,11 +177,11 @@ function fileTypeLabel(name: string): string {
 type UploadPhase = 'idle' | 'uploading' | 'processing' | 'done' | 'error';
 
 const EXTRACTION_STEPS: Array<{ label: string; detail: string }> = [
-  { label: 'Reading document structure', detail: 'Scanning pages and identifying text layers\u2026' },
-  { label: 'Extracting text content', detail: 'Pulling text from each page while preserving Gujarati Unicode\u2026' },
-  { label: 'Detecting chapters', detail: 'Identifying chapter headings and table of contents\u2026' },
-  { label: 'Analysing structure', detail: 'Mapping paragraph boundaries, verses, and section breaks\u2026' },
-  { label: 'Preparing for translation', detail: 'Validating extracted text and building section index\u2026' },
+  { label: 'Reading document structure', detail: 'Scanning pages and identifying text layers…' },
+  { label: 'Extracting text content', detail: 'Pulling text from each page while preserving Gujarati Unicode…' },
+  { label: 'Detecting chapters', detail: 'Identifying chapter headings and table of contents…' },
+  { label: 'Analysing structure', detail: 'Mapping paragraph boundaries, verses, and section breaks…' },
+  { label: 'Preparing for translation', detail: 'Validating extracted text and building section index…' },
 ];
 
 function FileUpload({ onExtracted, disabled, getToken }: { onExtracted: (text: string, filename: string, chapters: Array<{ title: string; startLine: number }> | null) => void; disabled: boolean; getToken: () => Promise<string | null> }) {
@@ -365,7 +364,7 @@ function FileUpload({ onExtracted, disabled, getToken }: { onExtracted: (text: s
               <div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
                   <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-muted)' }}>
-                    {EXTRACTION_STEPS[extractionStep]?.label ?? 'Processing\u2026'}
+                    {EXTRACTION_STEPS[extractionStep]?.label ?? 'Processing…'}
                   </span>
                   <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--amber)' }}>
                     {Math.round(((extractionStep + 1) / EXTRACTION_STEPS.length) * 100)}%
@@ -410,220 +409,98 @@ function FileUpload({ onExtracted, disabled, getToken }: { onExtracted: (text: s
   );
 }
 
-// ── ChunkCard ──────────────────────────────────────────────────────────────────
+// ── ChunkCard (PR 4: flags-driven, mobile-first) ──────────────────────────────
 
+/**
+ * Renders one chunk in the user-facing pipeline view. Reviewer scores are not
+ * shown here — they're admin-only telemetry. Translator self-flags are
+ * surfaced inline with a colour-coded dot:
+ *   • green = 0 self-flags (translator was confident)
+ *   • amber = 1–2 self-flags
+ *   • orange = 3+ self-flags (expandable to read the flag text)
+ */
 function ChunkCard({ chunk, expanded, onToggle }: { chunk: ChunkData; expanded: boolean; onToggle: () => void }) {
-  const hasR1 = chunk.reviewer1 !== undefined;
-  const hasR2 = chunk.score     !== undefined;
-
-  const passedCats  = chunk.reviewer1?.categories.filter(c => c.pass).length ?? 0;
-  const totalCats   = chunk.reviewer1?.categories.length ?? 0;
-  const certifiable = chunk.reviewer1?.certifiable ?? false;
-
-  const tier = hasR2 ? scoreTier(chunk.score!) : null;
-  const history = chunk.scoreHistory ?? [];
-  const hasMultipleRounds = history.length > 1;
-
-  const allIssues: Array<{ source: 'CERT' | 'STYLE'; text: string }> = [
-    ...(chunk.reviewer1?.pitfalls.map(p => ({ source: 'CERT' as const, text: p })) ?? []),
-    ...(chunk.issues?.map(i => ({ source: 'STYLE' as const, text: i })) ?? []),
-  ];
-
-  const displayText = chunk.revised || chunk.translation || '';
+  const flags = chunk.flags ?? [];
+  const flagTone =
+    flags.length === 0 ? 'green' :
+    flags.length <= 2 ? 'amber' :
+    'orange';
+  const dotColor =
+    flagTone === 'green' ? 'bg-[oklch(0.65_0.13_145)]' :
+    flagTone === 'amber' ? 'bg-[oklch(0.75_0.14_75)]' :
+    'bg-[oklch(0.62_0.18_45)]';
+  const displayText = chunk.translation ?? '';
 
   return (
-    <div style={{
-      background: chunk.reviewing ? 'var(--amber-bg)' : 'var(--bg-white)',
-      border: `1px solid ${chunk.reviewing ? 'var(--amber-border)' : 'var(--border)'}`,
-      borderRadius: 'var(--radius)', overflow: 'hidden', marginBottom: 12,
-      transition: 'all 0.3s',
-    }} className="fadein">
-
-      {/* ── Header — always visible, click to toggle ── */}
-      <div
+    <div className={cn(
+      'rounded-md border bg-paper overflow-hidden mb-3 transition-colors',
+    )}>
+      {/* Header — always visible, click to toggle */}
+      <button
+        type="button"
         onClick={onToggle}
-        style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '13px 18px', background: chunk.reviewing ? 'var(--amber-bg)' : 'var(--bg)', cursor: 'pointer', borderBottom: expanded ? '1px solid var(--border-light)' : 'none', userSelect: 'none' }}
+        aria-expanded={expanded}
+        className="w-full text-left flex items-center justify-between gap-3 px-3 py-3 sm:px-4 sm:py-3 min-h-[48px] hover:bg-paper-warm transition-colors"
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 14, flex: 1, minWidth: 0 }}>
-          <span style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 13, color: 'var(--text-light)', letterSpacing: 1, flexShrink: 0 }}>Chunk {chunk.index + 1}</span>
-
-          {/* Reviewing indicator */}
-          {chunk.reviewing && (
-            <span style={badgeStyle('running')}>Re-reviewing <span className="spinning" style={{ marginLeft: 4 }}>◌</span></span>
-          )}
-
-          {/* Certification badge */}
-          {!chunk.reviewing && hasR1 && (
-            <span style={{
-              fontSize: 10, fontWeight: 600, letterSpacing: 0.5, flexShrink: 0,
-              color: certifiable ? 'var(--green)' : totalCats > 0 ? 'var(--amber)' : 'var(--text-light)',
-            }}>
-              {certifiable ? '\u2713 Certified' : totalCats > 0 ? `${passedCats}/${totalCats} categories` : 'Auditing\u2026'}
-            </span>
-          )}
-          {!chunk.reviewing && !hasR1 && !hasR2 && displayText && (
-            <span style={{ fontSize: 13, fontWeight: 300, color: 'var(--text-muted)', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>
-              {displayText.slice(0, 80)}{displayText.length > 80 ? '\u2026' : ''}
-            </span>
-          )}
-
-          {/* Score evolution trail */}
-          {hasMultipleRounds && !chunk.reviewing && (
-            <span style={{ fontSize: 10, fontWeight: 500, color: 'var(--text-light)', letterSpacing: 0.3, flexShrink: 0 }}>
-              {history.map((s, i) => (
-                <span key={i}>
-                  {i > 0 && <span style={{ margin: '0 3px', color: s > history[i - 1] ? 'var(--green)' : 'var(--red)' }}>{s > history[i - 1] ? '\u2191' : '\u2193'}</span>}
-                  <span style={{ color: i === history.length - 1 ? 'var(--text)' : 'var(--text-muted)' }}>{s}%</span>
-                </span>
-              ))}
+        <div className="flex items-center gap-3 min-w-0 flex-1">
+          <span className={cn('h-2.5 w-2.5 rounded-full shrink-0', dotColor)} aria-hidden />
+          <span className="font-serif text-sm text-muted-foreground tracking-wide shrink-0">
+            Chunk {chunk.index + 1}
+          </span>
+          {!expanded && displayText && (
+            <span className="hidden sm:inline truncate text-sm text-muted-foreground/80 font-light">
+              {displayText.slice(0, 80)}
+              {displayText.length > 80 ? '…' : ''}
             </span>
           )}
         </div>
-
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-          {hasR2 && tier && !chunk.reviewing && (
-            <>
-              <span style={{ fontFamily: "'Karla', sans-serif", fontSize: 12, fontWeight: 700, color: tier.type === 'strong' ? 'var(--green)' : tier.type === 'adequate' ? 'var(--amber)' : 'var(--red)' }}>
-                {chunk.score}%
-              </span>
-              <span style={badgeStyle(tier.type)}>{tier.label}</span>
-            </>
-          )}
-          {hasMultipleRounds && (
-            <span style={{ fontSize: 10, fontWeight: 500, color: 'var(--text-light)', letterSpacing: 0.5 }}>
-              R{history.length}
-            </span>
-          )}
-          {allIssues.length > 0 && (
-            <span style={{ fontSize: 11, color: 'var(--amber)', fontWeight: 500 }}>
-              {allIssues.length} issue{allIssues.length !== 1 ? 's' : ''}
-            </span>
-          )}
-          <span style={{ fontSize: 11, color: 'var(--text-light)', marginLeft: 2 }}>{expanded ? '\u25B2' : '\u25BC'}</span>
+        <div className="flex items-center gap-2 shrink-0 text-xs text-muted-foreground">
+          <span className="tabular-nums">
+            {flags.length === 0 ? 'no flags' : `${flags.length} flag${flags.length === 1 ? '' : 's'}`}
+          </span>
+          <span aria-hidden className="text-[10px]">{expanded ? '▲' : '▼'}</span>
         </div>
-      </div>
+      </button>
 
-      {/* ── Collapsed preview ── */}
+      {/* Collapsed preview */}
       {!expanded && displayText && (
-        <div style={{ padding: '10px 18px', fontSize: 13, fontFamily: '"Cormorant Garamond", serif', fontWeight: 400, color: 'var(--text-muted)', lineHeight: 1.65, fontStyle: 'italic' }}>
-          {displayText.slice(0, 200)}{displayText.length > 200 ? '\u2026' : ''}
+        <div className="px-3 pb-3 sm:px-4 sm:pb-3 font-serif text-[15px] leading-[1.65] text-muted-foreground italic">
+          {displayText.slice(0, 200)}
+          {displayText.length > 200 ? '…' : ''}
         </div>
       )}
 
-      {/* ── Expanded detail ── */}
+      {/* Expanded detail */}
       {expanded && (
-        <div style={{ padding: '0 18px 20px' }}>
-
-          {/* Score explanation + evolution */}
-          {hasR2 && tier && (
-            <div style={{ padding: '14px 0 14px', borderBottom: '1px solid var(--border-light)', marginBottom: 16 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-                <span style={{ ...labelStyle, marginBottom: 0 }}>Quality Score</span>
-                <span style={{ fontFamily: "'Karla', sans-serif", fontSize: 20, fontWeight: 700, color: tier.type === 'strong' ? 'var(--green)' : tier.type === 'adequate' ? 'var(--amber)' : 'var(--red)' }}>
-                  {chunk.score}%
-                </span>
-                <span style={badgeStyle(tier.type)}>{tier.label}</span>
-                {hasMultipleRounds && (
-                  <span style={{ fontSize: 11, fontWeight: 400, color: 'var(--text-light)' }}>
-                    after {history.length} round{history.length !== 1 ? 's' : ''}
-                  </span>
-                )}
+        <div className="px-3 pb-4 sm:px-4 sm:pb-4 space-y-4 border-t bg-background/40">
+          {/* Translator self-flags */}
+          {flags.length > 0 && (
+            <div className="pt-3">
+              <div className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground mb-2">
+                Translator self-flags ({flags.length})
               </div>
-              <div style={{ height: 3, background: 'var(--border)', borderRadius: 2, marginBottom: 8 }}>
-                <div style={{ height: '100%', borderRadius: 2, width: `${chunk.score}%`, background: tier.type === 'strong' ? 'var(--green)' : tier.type === 'adequate' ? 'var(--amber)' : 'var(--red)', transition: 'width 0.5s' }} />
-              </div>
-              {/* Score evolution timeline */}
-              {hasMultipleRounds && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 0, marginBottom: 8, padding: '8px 12px', background: 'var(--bg)', borderRadius: 4, border: '1px solid var(--border-light)' }}>
-                  {history.map((s, i) => {
-                    const improved = i > 0 && s > history[i - 1];
-                    const declined = i > 0 && s < history[i - 1];
-                    const sTier = scoreTier(s);
-                    return (
-                      <span key={i} style={{ display: 'flex', alignItems: 'center' }}>
-                        {i > 0 && (
-                          <span style={{ margin: '0 8px', fontSize: 12, color: improved ? 'var(--green)' : declined ? 'var(--red)' : 'var(--text-muted)' }}>
-                            {improved ? '\u2192' : declined ? '\u2192' : '\u2192'}
-                          </span>
-                        )}
-                        <span style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
-                          <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: 0.5, textTransform: 'uppercase', color: 'var(--text-muted)' }}>
-                            {i === 0 ? 'Initial' : `Round ${i + 1}`}
-                          </span>
-                          <span style={{
-                            fontFamily: "'Karla', sans-serif", fontSize: 14, fontWeight: 700,
-                            color: sTier.type === 'strong' ? 'var(--green)' : sTier.type === 'adequate' ? 'var(--amber)' : 'var(--red)',
-                          }}>
-                            {s}%
-                          </span>
-                        </span>
-                      </span>
-                    );
-                  })}
-                </div>
-              )}
-              <div style={{ fontSize: 11, fontWeight: 300, color: 'var(--text-light)', lineHeight: 1.55 }}>
-                {tier.desc}{' '}
-                <span style={{ color: 'var(--text-muted)' }}>Scores terminology, punctuation, tone, style, and historical accuracy against BAPS certification checklist. \u226593% meets publication standard.</span>
-              </div>
-            </div>
-          )}
-
-          {/* Certification audit grid */}
-          {hasR1 && (chunk.reviewer1!.categories.length > 0 || chunk.reviewer1!.pitfalls.length > 0) && (
-            <div style={{ marginBottom: 16 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
-                <span style={{ ...labelStyle, marginBottom: 0 }}>Certification Audit</span>
-                {certifiable
-                  ? <span style={badgeStyle('strong')}>✓ Certified</span>
-                  : <span style={badgeStyle('adequate')}>{passedCats}/{totalCats} passed</span>
-                }
-              </div>
-              {chunk.reviewer1!.categories.length > 0 && (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: '6px 16px', marginBottom: 8 }}>
-                  {chunk.reviewer1!.categories.map(cat => (
-                    <div key={cat.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 7 }}>
-                      <span style={{ fontSize: 13, color: cat.pass ? 'var(--green)' : 'var(--red)', flexShrink: 0, lineHeight: '18px' }}>{cat.pass ? '✓' : '✗'}</span>
-                      <div>
-                        <span style={{ fontSize: 12, fontWeight: cat.pass ? 300 : 600, color: cat.pass ? 'var(--text-muted)' : 'var(--text)' }}>{cat.name || cat.id}{cat.weight ? ` (${cat.score ?? 0}/${cat.weight})` : ''}</span>
-                        {!cat.pass && (cat.deductions || cat.issues || []).map((iss, j) => (
-                          <div key={j} style={{ fontSize: 11, color: 'var(--red)', fontWeight: 300, lineHeight: 1.4 }}>{iss}</div>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Issues */}
-          {allIssues.length > 0 && (
-            <div style={{ marginBottom: 16 }}>
-              <div style={{ ...labelStyle, marginBottom: 10 }}>Issues Found &amp; Corrected ({allIssues.length})</div>
-              <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
-                {allIssues.map((issue, i) => (
-                  <li key={i} style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-                    <span style={{
-                      fontSize: 9, fontWeight: 700, letterSpacing: 0.8, padding: '2px 6px', borderRadius: 2, flexShrink: 0, marginTop: 3,
-                      background: issue.source === 'CERT' ? 'var(--amber-bg)' : 'var(--bg-warm)',
-                      color:      issue.source === 'CERT' ? 'var(--amber)' : 'var(--text-light)',
-                      border:     `1px solid ${issue.source === 'CERT' ? 'var(--amber-border)' : 'var(--border)'}`,
-                    }}>
-                      {issue.source}
-                    </span>
-                    <span style={{ fontSize: 13, fontWeight: 300, color: 'var(--text-muted)', lineHeight: 1.65 }}>{issue.text}</span>
+              <ul className="space-y-1.5">
+                {flags.map((flag, i) => (
+                  <li key={i} className="flex gap-2 items-start">
+                    <span className={cn('h-1.5 w-1.5 rounded-full mt-2 shrink-0', dotColor)} aria-hidden />
+                    <span className="text-sm font-light text-muted-foreground leading-[1.55]">{flag}</span>
                   </li>
                 ))}
               </ul>
+              <p className="mt-2 text-[11px] text-muted-foreground/70 leading-relaxed">
+                Flags are spans the translator was not fully confident about. They are not quality scores —
+                review them against the source if anything looks off.
+              </p>
             </div>
           )}
 
           {/* Final translation */}
           {displayText && (
             <div>
-              <div style={{ ...labelStyle, marginBottom: 8 }}>Final Translation</div>
-              <div style={{ padding: '14px 16px', background: 'var(--bg)', borderRadius: 6, border: '1px solid var(--border-light)' }}>
+              <div className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground mb-2">
+                Translation
+              </div>
+              <div className="rounded-md border border-border/60 bg-background px-3 py-3 sm:px-4 sm:py-3">
                 <DocumentRenderer text={displayText} compact />
               </div>
             </div>
@@ -638,9 +515,17 @@ function ChunkCard({ chunk, expanded, onToggle }: { chunk: ChunkData; expanded: 
 
 export default function Home() {
   return (
-    <Suspense fallback={<div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg)' }}><div style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 20, color: 'var(--text-muted)', fontStyle: 'italic' }}>Loading\u2026</div></div>}>
+    <Suspense fallback={<LoadingScreen />}>
       <HomeInner />
     </Suspense>
+  );
+}
+
+function LoadingScreen() {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-background">
+      <div className="font-serif italic text-xl text-muted-foreground">Loading…</div>
+    </div>
   );
 }
 
@@ -657,14 +542,14 @@ function HomeInner() {
   const [chunks, setChunks]       = useState<ChunkData[]>([]);
   const [expandedChunks, setExpandedChunks] = useState<Set<number>>(new Set());
   const [output, setOutput]       = useState('');
-  const [outputMeta, setOutputMeta] = useState({ words: 0, chunkCount: 0, avg: 0 });
+  const [outputMeta, setOutputMeta] = useState({ words: 0, chunkCount: 0, flagsCount: 0 });
   const [isRunning, setIsRunning] = useState(false);
   const [pipelineError, setPipelineError] = useState<string | null>(null);
   const [copied, setCopied]       = useState(false);
   const [enforcerCorrections, setEnforcerCorrections] = useState<EnforcerCorrection[]>([]);
   const [enforcerTotalFixes, setEnforcerTotalFixes] = useState(0);
   const [mainMenuOpen, setMainMenuOpen] = useState(false);
-  const [reviewerSummary, setReviewerSummary] = useState<{ avgScore: number; certifiedCount: number; totalChunks: number; categories: Array<{ id: string; weight: number; avgScore: number }>; totalDeductions: number; topIssues: string[] } | null>(null);
+  // Reviewer telemetry is admin-only; the user view has no reviewerSummary state.
   const [rulesExpanded, setRulesExpanded] = useState(false);
   const [outputExpanded, setOutputExpanded] = useState(false);
   const [translationId, setTranslationId] = useState<string | null>(null);
@@ -710,7 +595,7 @@ function HomeInner() {
           if (bookChaps.length > 0) {
             const combined = bookChaps.map(c => c.output).join('\n\n');
             setOutput(combined);
-            setOutputMeta({ words: wc(combined), chunkCount: bookChaps.length, avg: Math.round(bookChaps.reduce((s, c) => s + c.avgScore, 0) / bookChaps.length) });
+            setOutputMeta({ words: wc(combined), chunkCount: bookChaps.length, flagsCount: 0 });
             setTranslationId(bookChaps[0].id);
             setUploadedFilename(bookChaps[0].bookTitle ?? '');
             setTab('output');
@@ -720,7 +605,7 @@ function HomeInner() {
           const t = translations.find(t => t.id === viewId);
           if (t) {
             setOutput(t.output);
-            setOutputMeta({ words: t.outputWordCount, chunkCount: 1, avg: t.avgScore });
+            setOutputMeta({ words: t.outputWordCount, chunkCount: 1, flagsCount: 0 });
             setTranslationId(t.id);
             setUploadedFilename(t.chapterTitle ?? t.bookTitle ?? '');
             setTab('output');
@@ -749,7 +634,6 @@ function HomeInner() {
   const applyProgress = useCallback((progress: Record<string, unknown> | null) => {
     if (!progress) return;
     const stages = progress.stages as Record<string, Record<string, unknown>> | undefined;
-    const currentStage = progress.currentStage as string | undefined;
     const pollChunks = progress.chunks as Array<Record<string, unknown>> | undefined;
     const commentary = progress.commentary as string | undefined;
     if (commentary) setPipelineCommentary(commentary);
@@ -770,45 +654,36 @@ function HomeInner() {
         if (s.id === 'translator') {
           const c = sd.completed as number ?? 0, t = sd.total as number ?? 1;
           if (status === 'running') {
-            if (t === 1) { msg = 'Translating\u2026'; progressPct = null; }
-            else { msg = `Translated ${c} of ${t} chunks\u2026`; progressPct = Math.round(c / t * 100); }
+            if (t === 1) { msg = 'Translating…'; progressPct = null; }
+            else { msg = `Translated ${c} of ${t} chunks…`; progressPct = Math.round(c / t * 100); }
           }
           if (status === 'done') { msg = t === 1 ? 'Translation complete' : `All ${t} chunks translated`; progressPct = 100; }
-        }
-        if (s.id === 'reviewer') {
-          const c = sd.completed as number ?? 0, t = sd.total as number ?? 1;
-          const avg = sd.avgScore as number ?? 0;
-          const cert = sd.certCount as number ?? 0;
-          const rechecked = sd.rechecked as number ?? 0;
-          if (status === 'running') {
-            if (t === 1) { msg = 'Scoring against 6-category rubric\u2026'; progressPct = null; }
-            else { msg = `Reviewed ${c} of ${t} chunks (avg ${avg}%)\u2026`; progressPct = Math.round(c / t * 100); }
-          }
-          if (status === 'done') { msg = `Review complete \u2014 ${cert}/${t} certified, avg ${avg}%${rechecked > 0 ? ` (${rechecked} re-reviewed)` : ''}`; progressPct = 100; }
         }
         if (s.id === 'smoother') {
           const c = sd.completed as number ?? 0, t = sd.total as number ?? 1;
           if (status === 'running') {
-            if (t === 1) { msg = 'Applying readability pass\u2026'; progressPct = null; }
-            else { msg = `Smoothed ${c} of ${t} chunks\u2026`; progressPct = Math.round(c / t * 100); }
+            if (t === 1) { msg = 'Applying readability pass…'; progressPct = null; }
+            else { msg = `Smoothed ${c} of ${t} chunks…`; progressPct = Math.round(c / t * 100); }
           }
           if (status === 'done') { msg = 'Readability pass complete'; progressPct = 100; }
         }
         if (s.id === 'assembler') {
-          if (status === 'running') msg = 'Joining chunks into a single document\u2026';
+          if (status === 'running') msg = 'Joining chunks into a single document…';
           if (status === 'done') msg = 'Document assembled';
         }
         if (s.id === 'enforcer') {
-          if (status === 'running') msg = 'Applying Aksharpith house rules\u2026';
-          if (status === 'done') { const f = sd.totalFixes as number ?? 0; msg = `Rules enforced \u2014 ${f} correction${f !== 1 ? 's' : ''} applied`; }
+          if (status === 'running') msg = 'Applying Aksharpith house rules…';
+          if (status === 'done') { const f = sd.totalFixes as number ?? 0; msg = `Rules enforced — ${f} correction${f !== 1 ? 's' : ''} applied`; }
         }
 
-        // Mark stages before current as done
         return { ...s, status, msg, progress: progressPct };
       }));
     }
 
-    // Update chunk cards from poll data
+    // Update chunk cards from poll data. The user-facing API only returns
+    // index, original, translation, and flags; reviewer-derived fields
+    // (score, certifiable, categories, deductions) are stripped at the
+    // /api/translate/[jobId] boundary and only surface in /admin.
     if (pollChunks && pollChunks.length > 0) {
       for (const c of pollChunks) {
         const idx = c.index as number;
@@ -816,25 +691,16 @@ function HomeInner() {
         chunkMap.current[idx] = {
           ...existing,
           translation: (c.translation as string) ?? existing.translation,
-          reviewer1: c.categories ? {
-            categories: c.categories as Reviewer1Category[],
-            pitfalls: (c.pitfalls as string[]) ?? [],
-            score: (c.score as number) ?? 0,
-            certifiable: (c.certifiable as boolean) ?? false,
-          } : existing.reviewer1,
-          score: (c.score as number) ?? existing.score,
-          issues: (c.issues as string[]) ?? existing.issues,
-          scoreHistory: (c.scoreHistory as number[]) ?? existing.scoreHistory,
-          reviewRound: (c.reviewRound as number) ?? existing.reviewRound,
+          flags: Array.isArray(c.flags) ? (c.flags as string[]) : existing.flags,
         };
       }
       setChunks(Object.values(chunkMap.current).sort((a, b) => a.index - b.index));
     }
-  }, [updateStage]);
+  }, []);
 
   // ── Run a single section through the pipeline (polling) ────────────────────
 
-  const runSection = async (text: string, chapterTitle?: string, bookId?: string, chapterIndex?: number, totalChapters?: number): Promise<{ output: string; avg: number; wordCount: number } | null> => {
+  const runSection = async (text: string, chapterTitle?: string, bookId?: string, chapterIndex?: number, totalChapters?: number): Promise<{ output: string; flagsCount: number; wordCount: number } | null> => {
     // In book mode, don't reset stages between chapters — show continuous progress
     // The chapter bar handles per-chapter tracking
     if (!bookId) {
@@ -843,7 +709,7 @@ function HomeInner() {
       // Update all stages to show current chapter context
       const chLabel = `Section ${(chapterIndex ?? 0) + 1}/${totalChapters ?? '?'}`;
       setStages(prev => prev.map(s => s.status === 'done' ? { ...s, status: 'waiting' as const, msg: '', progress: null } : s));
-      updateStage('chunker', { status: 'running', msg: `${chLabel} \u2014 preparing\u2026` });
+      updateStage('chunker', { status: 'running', msg: `${chLabel} — preparing…` });
     }
     setChunks([]);
     setExpandedChunks(new Set());
@@ -872,9 +738,9 @@ function HomeInner() {
       // Estimate: ~30s per 500-word chunk (translate + review + smooth)
       const estChunks = Math.ceil((text.trim().split(/\s+/).length) / 500);
       const estMinutes = Math.max(1, Math.round(estChunks * 30 / 60));
-      updateStage('chunker', { status: 'running', msg: `Processing locally \u2014 estimated ${estMinutes} min for this document\u2026` });
+      updateStage('chunker', { status: 'running', msg: `Processing locally — estimated ${estMinutes} min for this document…` });
     } else {
-      updateStage('chunker', { status: 'running', msg: 'Job created \u2014 pipeline starting\u2026' });
+      updateStage('chunker', { status: 'running', msg: 'Job created — pipeline starting…' });
       // Trigger pipeline on Vercel (fire-and-forget — blocks on server while pipeline runs)
       fetch(`/api/translate/${jobId}/run`, {
         method: 'POST',
@@ -883,7 +749,7 @@ function HomeInner() {
     }
 
     // Step 3: Poll for status
-    let result: { output: string; avg: number; wordCount: number } | null = null;
+    let result: { output: string; flagsCount: number; wordCount: number } | null = null;
     const pollStart = Date.now();
 
     while (true) {
@@ -902,7 +768,7 @@ function HomeInner() {
 
       // Warn if local job hasn't started after 15s
       if (mode === 'local' && poll.status === 'pending' && Date.now() - pollStart > 15000) {
-        updateStage('chunker', { status: 'running', msg: 'Queued for local processing \u2014 the worker will pick this up shortly\u2026' });
+        updateStage('chunker', { status: 'running', msg: 'Queued for local processing — the worker will pick this up shortly…' });
       }
 
       // Apply progress to UI
@@ -912,9 +778,8 @@ function HomeInner() {
         const r = poll.result;
         setEnforcerCorrections(r.corrections ?? []);
         setEnforcerTotalFixes(r.totalFixes ?? 0);
-        if (r.reviewerSummary) setReviewerSummary(r.reviewerSummary);
         if (r.translationId) setTranslationId(r.translationId);
-        result = { output: r.output, avg: r.avgScore, wordCount: r.wordCount };
+        result = { output: r.output, flagsCount: r.flagsCount ?? 0, wordCount: r.wordCount };
         break;
       }
 
@@ -956,7 +821,7 @@ function HomeInner() {
     const outputs: string[] = new Array(chapterArr.length).fill('');
     type SnapState = {
       status: 'pending' | 'running' | 'completed' | 'failed';
-      result: { output?: string; avgScore?: number; wordCount?: number } | null;
+      result: { output?: string; flagsCount?: number; wordCount?: number } | null;
       progress: Record<string, unknown> | null;
     };
     const states = new Map<number, SnapState>();
@@ -1000,7 +865,7 @@ function HomeInner() {
                       ...c,
                       status: uiStatus,
                       output: r?.output ?? c.output,
-                      avgScore: r?.avgScore ?? c.avgScore,
+                      flagsCount: r?.flagsCount ?? c.flagsCount,
                       wordCount: r?.wordCount ?? inputObj.wordCount ?? c.wordCount,
                     }
                   : c,
@@ -1069,7 +934,6 @@ function HomeInner() {
     setOutputExpanded(false);
     setTranslationId(null);
     setCommentCounts({});
-    setReviewerSummary(null);
     setEnforcerTotalFixes(0);
     setProcessingMode(null);
     setPipelineCommentary(null);
@@ -1079,7 +943,7 @@ function HomeInner() {
 
     try {
       if (isBookMode && bookChapters.length > 0) {
-        setBookChapters(prev => prev.map(c => ({ ...c, status: 'pending' as const, output: undefined, avgScore: undefined, wordCount: undefined })));
+        setBookChapters(prev => prev.map(c => ({ ...c, status: 'pending' as const, output: undefined, flagsCount: undefined, wordCount: undefined })));
         const bookRunId = crypto.randomUUID();
         const chapterLines = inputText.split('\n');
 
@@ -1097,13 +961,11 @@ function HomeInner() {
             const outputs = await runBookViaServerEnqueue(chapterArr, bookRunId, uploadedFilename || undefined);
             const combined = outputs.filter(Boolean).join('\n\n');
             setOutput(combined);
+            const totalFlags = bookChapters.reduce((s, c) => s + (c.flagsCount ?? 0), 0);
             setOutputMeta({
               words: wc(combined),
               chunkCount: chapterArr.length,
-              avg: Math.round(
-                bookChapters.filter(c => c.avgScore).reduce((s, c) => s + (c.avgScore ?? 0), 0) /
-                Math.max(1, bookChapters.filter(c => c.avgScore).length),
-              ),
+              flagsCount: totalFlags,
             });
             if (combined) setTimeout(() => setTab('output'), 400);
           } catch (e) {
@@ -1117,7 +979,7 @@ function HomeInner() {
         const res = await runSection(inputText);
         if (res) {
           setOutput(res.output);
-          setOutputMeta({ words: res.wordCount, chunkCount: Object.keys(chunkMap.current).length, avg: res.avg });
+          setOutputMeta({ words: res.wordCount, chunkCount: Object.keys(chunkMap.current).length, flagsCount: res.flagsCount });
           setTimeout(() => setTab('output'), 400);
         }
       }
@@ -1164,20 +1026,20 @@ function HomeInner() {
 
   if (loading || !user) {
     return (
-      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg)' }}>
-        <div style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 20, color: 'var(--text-muted)', fontStyle: 'italic' }}>Loading…</div>
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="font-serif italic text-xl text-muted-foreground">Loading…</div>
       </div>
     );
   }
 
   const errorBanner = pipelineError && (
-    <div style={{ background: 'var(--red-bg)', border: '1px solid var(--red-border)', borderRadius: 'var(--radius)', padding: '14px 18px', fontSize: 13, color: 'var(--red)', fontWeight: 300, marginBottom: 20 }}>
-      <strong style={{ fontWeight: 600 }}>Error: </strong>{pipelineError}
+    <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2.5 sm:px-4 text-sm text-destructive">
+      <strong className="font-semibold">Error: </strong>{pipelineError}
     </div>
   );
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
+    <div className="flex flex-col min-h-screen bg-background">
 
       {/* Header — shadcn / Tailwind v4. Logo + serif title, ghost menu button. */}
       <header ref={headerRef} className="sticky top-0 z-50 bg-paper/95 backdrop-blur border-b border-border">
@@ -1198,28 +1060,32 @@ function HomeInner() {
             <div className="relative">
               <Button
                 variant="ghost"
-                size="sm"
+                size="icon"
                 onClick={() => setMainMenuOpen(!mainMenuOpen)}
-                aria-label="Menu"
+                aria-label="Open menu"
+                aria-expanded={mainMenuOpen}
+                className="min-h-[44px] min-w-[44px]"
               >
-                ☰
+                <span aria-hidden className="text-base">☰</span>
               </Button>
               {mainMenuOpen && (
                 <>
-                  <div className="fixed inset-0 z-10" onClick={() => setMainMenuOpen(false)} />
-                  <div className="absolute right-0 top-10 z-20 min-w-[200px] rounded-md border bg-popover shadow-md overflow-hidden">
-                    <div className="px-3 py-2 border-b text-xs text-muted-foreground truncate font-mono">
+                  <div className="fixed inset-0 z-10" onClick={() => setMainMenuOpen(false)} aria-hidden />
+                  <div className="absolute right-0 top-12 z-20 min-w-[220px] rounded-md border bg-popover shadow-md overflow-hidden">
+                    <div className="px-3 py-2.5 border-b text-xs text-muted-foreground truncate font-mono">
                       {user.email}
                     </div>
                     <button
+                      type="button"
                       onClick={() => { setMainMenuOpen(false); router.push('/history'); }}
-                      className="block w-full text-left px-3 py-2 text-sm hover:bg-accent transition-colors"
+                      className="block w-full text-left px-3 py-3 min-h-[44px] text-sm hover:bg-accent transition-colors"
                     >
                       History
                     </button>
                     <button
+                      type="button"
                       onClick={() => { setMainMenuOpen(false); signOut(); }}
-                      className="block w-full text-left px-3 py-2 text-sm hover:bg-accent border-t transition-colors"
+                      className="block w-full text-left px-3 py-3 min-h-[44px] text-sm hover:bg-accent border-t transition-colors"
                     >
                       Sign out
                     </button>
@@ -1233,15 +1099,17 @@ function HomeInner() {
 
       {/* Tab strip — sticky under header */}
       <div className="sticky z-40 bg-paper/95 backdrop-blur border-b border-border" style={{ top: 'var(--header-h, 60px)' }}>
-        <div className="mx-auto max-w-3xl px-5 flex">
+        <div className="mx-auto max-w-3xl px-4 sm:px-5 flex">
           {(['input', 'pipeline', 'output'] as Tab[]).map(t => {
             const active = tab === t;
             return (
               <button
                 key={t}
+                type="button"
                 onClick={() => setTab(t)}
+                aria-pressed={active}
                 className={cn(
-                  'flex-1 py-3 text-[10px] font-mono uppercase tracking-[0.15em] transition-colors',
+                  'flex-1 min-h-[44px] py-3 text-[10px] sm:text-[11px] font-mono uppercase tracking-[0.15em] transition-colors',
                   'border-b-2',
                   active
                     ? 'border-foreground text-foreground'
@@ -1257,44 +1125,49 @@ function HomeInner() {
 
       {/* ── INPUT TAB ── */}
       {tab === 'input' && (
-        <div style={{ padding: '24px 20px', display: 'flex', flexDirection: 'column', gap: 20, maxWidth: 780, margin: '0 auto', width: '100%' }}>
+        <div className="mx-auto w-full max-w-3xl px-4 sm:px-5 py-5 sm:py-6 flex flex-col gap-4 sm:gap-5">
 
           {errorBanner}
 
-          {/* Input mode toggle */}
-          <div style={{ display: 'flex', gap: 0, background: 'var(--bg-warm)', borderRadius: 'var(--radius)', padding: 3, border: '1px solid var(--border)' }}>
+          {/* Input mode toggle — segmented, ≥44px tall on touch devices */}
+          <div className="flex rounded-md border bg-paper-warm p-1" role="tablist" aria-label="Input mode">
             {(['paste', 'upload'] as InputMode[]).map(m => (
-              <button key={m} onClick={() => setInputMode(m)} style={{
-                flex: 1, padding: '9px 12px', border: 'none', borderRadius: 6,
-                background: inputMode === m ? 'var(--bg-white)' : 'transparent',
-                boxShadow: inputMode === m ? '0 1px 3px rgba(0,0,0,0.08)' : 'none',
-                fontFamily: "'Karla', sans-serif", fontSize: 11, fontWeight: 600,
-                letterSpacing: '1px', textTransform: 'uppercase',
-                color: inputMode === m ? 'var(--text)' : 'var(--text-light)',
-                cursor: 'pointer', transition: 'all 0.2s',
-              }}>
+              <button
+                key={m}
+                role="tab"
+                aria-selected={inputMode === m}
+                onClick={() => setInputMode(m)}
+                className={cn(
+                  'flex-1 min-h-[44px] rounded-[6px] font-mono text-[11px] uppercase tracking-wider transition-colors',
+                  inputMode === m
+                    ? 'bg-paper text-foreground shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground',
+                )}
+              >
                 {m === 'paste' ? 'Paste Text' : 'Upload File'}
               </button>
             ))}
           </div>
 
           {/* Source input */}
-          <div style={{ background: 'var(--bg-white)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: '22px 24px' }}>
-            <div style={labelStyle}>{inputMode === 'paste' ? 'Gujarati Source Text' : 'Upload Document'}</div>
+          <div className="rounded-md border bg-paper px-4 py-5 sm:px-6 sm:py-6">
+            <div className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground mb-2">
+              {inputMode === 'paste' ? 'Gujarati Source Text' : 'Upload Document'}
+            </div>
 
             {inputMode === 'upload' ? (
               <>
                 <FileUpload onExtracted={handleFileExtracted} disabled={isRunning} getToken={getIdToken} />
                 {inputText && (
-                  <div style={{ marginTop: 14, padding: '12px 16px', background: 'var(--bg-warm)', border: '1px solid var(--border)', borderRadius: 6 }}>
-                    <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: 1, textTransform: 'uppercase', color: 'var(--green)', marginBottom: 4 }}>
+                  <div className="mt-3 rounded-md border bg-paper-warm/70 px-3 py-2.5 sm:px-4">
+                    <div className="text-[11px] font-mono uppercase tracking-wider text-[oklch(0.42_0.10_145)] mb-1">
                       ✓ Extracted — {uploadedFilename}
                     </div>
-                    <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                    <div className="text-xs text-muted-foreground">
                       {words.toLocaleString()} words
                       {isBookMode && bookChapters.length > 0 && ` · ${bookChapters.length} sections detected — book mode active`}
                     </div>
-                    <div style={{ fontSize: 12, color: 'var(--text-light)', marginTop: 6, fontFamily: '"Cormorant Garamond", serif', fontStyle: 'italic', lineHeight: 1.5 }}>
+                    <div className="mt-1.5 font-serif italic text-[13px] leading-relaxed text-muted-foreground/80 line-clamp-3">
                       {inputText.slice(0, 200)}…
                     </div>
                   </div>
@@ -1307,18 +1180,22 @@ function HomeInner() {
                   onChange={e => setInputText(e.target.value)}
                   placeholder="Paste Gujarati text here…"
                   disabled={isRunning}
-                  style={{
-                    width: '100%', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 6,
-                    padding: 14, fontSize: 17, fontWeight: 400, color: 'var(--text)', lineHeight: 1.8,
-                    outline: 'none', resize: 'vertical', minHeight: 200, marginTop: 8, transition: 'border-color 0.2s',
-                  }}
+                  className="w-full mt-2 min-h-[200px] rounded-md border bg-background px-3 py-3 sm:px-4 text-[16px] sm:text-[17px] leading-[1.8] text-foreground outline-none resize-y focus:border-foreground/40 transition-colors"
                 />
-                <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8 }}>
-                  <button onClick={() => setInputText(SAMPLE)} style={{ fontSize: 11, fontWeight: 500, color: 'var(--text-light)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+                <div className="mt-2 flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <button
+                    type="button"
+                    onClick={() => setInputText(SAMPLE)}
+                    className="self-start min-h-[44px] sm:min-h-0 px-2 -ml-2 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                  >
                     Load sample text
                   </button>
-                  <div style={{ fontSize: 11, fontWeight: 400, color: words > MAX_WORDS ? 'var(--red)' : 'var(--text-light)' }}>
-                    {words.toLocaleString()} / {MAX_WORDS.toLocaleString()} words{words > MAX_WORDS ? ' — too long' : words > WARN_WORDS ? ' — use book mode' : ''}
+                  <div className={cn(
+                    'text-xs tabular-nums',
+                    words > MAX_WORDS ? 'text-destructive' : 'text-muted-foreground',
+                  )}>
+                    {words.toLocaleString()} / {MAX_WORDS.toLocaleString()} words
+                    {words > MAX_WORDS ? ' — too long' : words > WARN_WORDS ? ' — use book mode' : ''}
                   </div>
                 </div>
               </>
@@ -1327,59 +1204,69 @@ function HomeInner() {
 
           {/* Book mode panel */}
           {isBookMode && bookChapters.length > 0 && (
-            <div style={{ background: 'var(--green-bg)', border: '1px solid var(--green-border)', borderRadius: 'var(--radius)', padding: '18px 22px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-                <div style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 18, color: 'var(--text)' }}>Book Mode</div>
-                <span style={badgeStyle('strong')}>{bookChapters.length} sections</span>
+            <div className="rounded-md border border-[oklch(0.85_0.04_145)] bg-[oklch(0.97_0.025_145)] px-4 py-4 sm:px-5 sm:py-5">
+              <div className="flex items-baseline justify-between gap-3 mb-2">
+                <div className="font-serif text-base text-foreground">Book Mode</div>
+                <Badge variant="outline" className="font-mono text-[10px] uppercase tracking-wider">
+                  {bookChapters.length} sections
+                </Badge>
               </div>
-              <div style={{ fontSize: 12, fontWeight: 300, color: 'var(--text-muted)', lineHeight: 1.6 }}>
-                Each section will be processed through the full 6-stage pipeline. Translation memory is maintained across sections.
-              </div>
-              <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                Each section is processed through the full pipeline. Translation memory is preserved across sections.
+              </p>
+              <ul className="mt-3 space-y-1">
                 {bookChapters.slice(0, 8).map((ch, i) => (
-                  <div key={i} style={{ fontSize: 12, fontWeight: 300, color: 'var(--text-muted)', display: 'flex', gap: 8 }}>
-                    <span style={{ color: 'var(--text-light)', width: 20, flexShrink: 0 }}>{String(i + 1).padStart(2, '0')}</span>
-                    {ch.title}
-                  </div>
+                  <li key={i} className="flex gap-2 text-xs text-muted-foreground">
+                    <span className="font-mono text-muted-foreground/70 w-5 shrink-0 tabular-nums">{String(i + 1).padStart(2, '0')}</span>
+                    <span className="truncate">{ch.title}</span>
+                  </li>
                 ))}
-                {bookChapters.length > 8 && <div style={{ fontSize: 12, color: 'var(--text-light)' }}>+{bookChapters.length - 8} more…</div>}
-              </div>
-              <button onClick={() => { setIsBookMode(false); setBookChapters([]); }} style={{ marginTop: 12, fontSize: 11, fontWeight: 500, color: 'var(--green)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>
+                {bookChapters.length > 8 && (
+                  <li className="text-xs text-muted-foreground/70">+{bookChapters.length - 8} more…</li>
+                )}
+              </ul>
+              <button
+                type="button"
+                onClick={() => { setIsBookMode(false); setBookChapters([]); }}
+                className="mt-3 min-h-[44px] sm:min-h-0 px-2 -ml-2 text-xs text-[oklch(0.42_0.10_145)] hover:underline"
+              >
                 Switch to single-section mode
               </button>
             </div>
           )}
 
           {/* Aksharpith reference context */}
-          <div style={{ background: 'var(--bg-warm)', borderLeft: '2px solid var(--text-light)', borderRadius: '0 var(--radius) var(--radius) 0', padding: '20px 24px' }}>
-            <div style={{ ...labelStyle, marginBottom: 10 }}>Reference Context Loaded</div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          <div className="rounded-r-md border-l-2 border-l-muted-foreground/30 bg-paper-warm/60 px-4 py-4 sm:px-5">
+            <div className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground mb-2.5">
+              Reference Context Loaded
+            </div>
+            <ul className="grid gap-1.5 sm:grid-cols-2">
               {[
                 'Aksharpith House Rules (full)',
                 'Aksharpith Master Glossary',
-                'BAPS Certification Checklist',
-                'BAPS Common Pitfalls (20 items)',
+                'Sadhu-approved 4-prompt chain',
+                'BAPS terminology corrections',
                 'Documented corrections archive',
-                'Cross-chunk translation memory',
+                'Translator self-flag protocol',
               ].map(rule => (
-                <div key={rule} style={{ fontSize: 13, fontWeight: 300, color: 'var(--text-muted)', display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-                  <span style={{ color: 'var(--green)', fontWeight: 500, flexShrink: 0 }}>✓</span>
+                <li key={rule} className="flex gap-2 text-xs text-muted-foreground items-start">
+                  <span className="text-[oklch(0.42_0.10_145)] font-medium shrink-0" aria-hidden>✓</span>
                   {rule}
-                </div>
+                </li>
               ))}
-            </div>
+            </ul>
           </div>
 
-          {/* Run / stop \u2014 single CTA per docs/redesign-brief.md */}
+          {/* Run / stop — single CTA. Min-height ensures touch target. */}
           <Button
             onClick={isRunning ? handleStop : handleRun}
             disabled={!isRunning && !inputText.trim()}
             variant={isRunning ? 'outline' : 'default'}
             size="lg"
-            className="w-full font-serif text-lg"
+            className="w-full min-h-[52px] font-serif text-base sm:text-lg"
           >
             {isRunning
-              ? `${isBookMode ? `Processing chapter ${currentChapterIdx + 1} of ${bookChapters.length}` : 'Translation in progress'} \u2014 click to stop`
+              ? `${isBookMode ? `Processing chapter ${currentChapterIdx + 1} of ${bookChapters.length}` : 'Translation in progress'} — tap to stop`
               : `Begin ${isBookMode ? 'book ' : ''}translation`}
           </Button>
         </div>
@@ -1387,62 +1274,66 @@ function HomeInner() {
 
       {/* ── PIPELINE TAB ── */}
       {tab === 'pipeline' && (
-        <div style={{ padding: '24px 20px', display: 'flex', flexDirection: 'column', gap: 0, maxWidth: 780, margin: '0 auto', width: '100%' }}>
+        <div className="mx-auto w-full max-w-3xl px-4 sm:px-5 py-5 sm:py-6 flex flex-col gap-3">
 
           {errorBanner}
 
           {/* Processing mode badge */}
           {processingMode && (
-            <div style={{
-              display: 'inline-flex', alignItems: 'center', gap: 6,
-              padding: '6px 12px', borderRadius: 6, fontSize: 11, fontWeight: 600,
-              letterSpacing: 1, textTransform: 'uppercase', marginBottom: 12,
-              background: processingMode === 'local' ? 'rgba(99,102,241,0.08)' : 'rgba(16,185,129,0.08)',
-              color: processingMode === 'local' ? '#6366f1' : '#10b981',
-              border: `1px solid ${processingMode === 'local' ? 'rgba(99,102,241,0.2)' : 'rgba(16,185,129,0.2)'}`,
-              fontFamily: "'Karla', sans-serif",
-            }}>
-              <span style={{ fontSize: 13 }}>{processingMode === 'local' ? '\uD83D\uDDA5' : '\u2601\uFE0F'}</span>
+            <Badge
+              variant="outline"
+              className={cn(
+                'self-start font-mono text-[10px] uppercase tracking-wider px-2.5 py-1',
+                processingMode === 'local'
+                  ? 'border-[oklch(0.78_0.10_270)] text-[oklch(0.45_0.13_270)] bg-[oklch(0.97_0.02_270)]'
+                  : 'border-[oklch(0.80_0.09_165)] text-[oklch(0.42_0.10_165)] bg-[oklch(0.97_0.02_165)]',
+              )}
+            >
               {processingMode === 'local' ? 'Local processing' : 'Cloud processing'}
-            </div>
+            </Badge>
           )}
 
           {isBookMode && <ChapterBar chapters={bookChapters} />}
 
-          {/* Stage cards */}
-          {stages.map((stage, i) => (
-            <div key={stage.id}>
-              <StageCard stage={stage} commentary={stage.status === 'running' ? pipelineCommentary : null} />
-              {i < stages.length - 1 && <div style={{ width: 1, height: 8, background: 'var(--border)', marginLeft: 18 }} />}
-            </div>
-          ))}
+          {/* Stage cards — vertical list, no spinners, words tell the story */}
+          <div className="flex flex-col gap-2">
+            {stages.map(stage => (
+              <StageCard
+                key={stage.id}
+                stage={stage}
+                commentary={stage.status === 'running' ? pipelineCommentary : null}
+              />
+            ))}
+          </div>
 
           {/* Chunk detail */}
           {chunks.length > 0 && (
-            <div style={{ marginTop: 36 }}>
-              <div style={{ display: 'flex', alignItems: 'baseline', gap: 14, marginBottom: 4 }}>
-                <div style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 24, fontWeight: 400, color: 'var(--text)' }}>
-                  Chunk Detail
-                </div>
-                <span style={{ fontSize: 11, color: 'var(--text-light)', fontWeight: 300 }}>Click any chunk to expand</span>
+            <div className="mt-6 sm:mt-9">
+              <div className="flex items-baseline gap-3 mb-1 flex-wrap">
+                <h2 className="font-serif text-xl sm:text-2xl text-foreground">Chunk Detail</h2>
+                <span className="text-xs text-muted-foreground/80">Tap any chunk to expand</span>
               </div>
-              <div style={{ width: 48, height: 1, background: 'var(--border)', margin: '8px 0 16px' }} />
+              <div className="w-12 h-px bg-border my-2 mb-4" />
 
-              {/* Score legend */}
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 16px', marginBottom: 16, padding: '10px 14px', background: 'var(--bg-warm)', borderRadius: 6, border: '1px solid var(--border)' }}>
-                <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: 1.5, textTransform: 'uppercase', color: 'var(--text-light)', width: '100%', marginBottom: 4 }}>Score Guide</span>
-                {[
-                  { label: '90–100%', name: 'Publication Ready', type: 'strong' as const },
-                  { label: '80–89%',  name: 'Strong',            type: 'strong' as const },
-                  { label: '70–79%',  name: 'Revised',           type: 'adequate' as const },
-                  { label: '60–69%',  name: 'Needs Work',        type: 'adequate' as const },
-                  { label: '<60%',    name: 'Poor',              type: 'weak' as const },
-                ].map(s => (
-                  <div key={s.label} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                    <span style={{ fontSize: 11, color: 'var(--text-light)', fontWeight: 300 }}>{s.label}</span>
-                    <span style={badgeStyle(s.type)}>{s.name}</span>
-                  </div>
-                ))}
+              {/* Flag legend — translator self-flags only, not quality scores */}
+              <div className="mb-4 rounded-md border bg-paper-warm/60 px-3 py-2.5 sm:px-4">
+                <div className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground mb-2">
+                  Translator self-flags
+                </div>
+                <ul className="flex flex-col gap-1.5 sm:flex-row sm:flex-wrap sm:gap-x-5 sm:gap-y-1.5 text-xs text-muted-foreground">
+                  <li className="flex items-center gap-2">
+                    <span className="h-2 w-2 rounded-full bg-[oklch(0.65_0.13_145)] shrink-0" aria-hidden />
+                    0 flags — translator was confident
+                  </li>
+                  <li className="flex items-center gap-2">
+                    <span className="h-2 w-2 rounded-full bg-[oklch(0.75_0.14_75)] shrink-0" aria-hidden />
+                    1–2 flags — verify against source
+                  </li>
+                  <li className="flex items-center gap-2">
+                    <span className="h-2 w-2 rounded-full bg-[oklch(0.62_0.18_45)] shrink-0" aria-hidden />
+                    3+ flags — read flagged spans
+                  </li>
+                </ul>
               </div>
 
               {chunks.map(chunk => (
@@ -1492,66 +1383,40 @@ function HomeInner() {
 
       {/* ── OUTPUT TAB ── */}
       {tab === 'output' && (
-        <div style={{ padding: '24px 20px', display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 820, margin: '0 auto', width: '100%' }}>
+        <div className="mx-auto w-full max-w-3xl px-4 sm:px-5 py-5 sm:py-6 flex flex-col gap-4">
           {!output ? (
-            <div style={{ textAlign: 'center', padding: '48px 20px' }}>
-              <div style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 24, fontWeight: 300, fontStyle: 'italic', marginBottom: 8, color: 'var(--text-muted)' }}>
-                {isRunning ? <span className="spinning">\u25CC</span> : 'No output yet'}
+            <div className="text-center py-12">
+              <div className="font-serif italic text-2xl text-muted-foreground mb-2">
+                {isRunning ? 'Processing…' : 'No output yet'}
               </div>
-              <p style={{ fontSize: 13, fontWeight: 300, color: 'var(--text-light)' }}>
-                {isRunning ? 'Processing\u2026' : 'Start the pipeline to see output here'}
+              <p className="text-sm text-muted-foreground/70">
+                {isRunning ? 'Live progress is on the Pipeline tab.' : 'Start the pipeline to see output here.'}
               </p>
             </div>
           ) : (
             <>
-              {/* Document page */}
-              <div style={{
-                background: '#fff',
-                borderRadius: 4,
-                boxShadow: '0 1px 4px rgba(0,0,0,0.06), 0 8px 24px rgba(0,0,0,0.04)',
-                border: '1px solid rgba(0,0,0,0.06)',
-                padding: '48px 56px 40px',
-                minHeight: 400,
-              }}>
+              {/* Document page — paper-like card, mobile padding scales down */}
+              <div className="rounded-md bg-paper border shadow-sm px-5 py-8 sm:px-12 sm:py-12 min-h-[300px]">
                 {/* Document title */}
-                <div style={{ textAlign: 'center', marginBottom: 32 }}>
-                  <div style={{
-                    fontFamily: '"Cormorant Garamond", serif',
-                    fontSize: 28, fontWeight: 600, color: 'var(--text)',
-                    lineHeight: 1.3, letterSpacing: '-0.3px',
-                  }}>
+                <div className="text-center mb-6 sm:mb-8">
+                  <div className="font-serif text-2xl sm:text-[28px] font-semibold text-foreground leading-tight">
                     {uploadedFilename
                       ? uploadedFilename.replace(/\.[^.]+$/, '').replace(/[-_]/g, ' ')
                       : 'Translation'}
                   </div>
-                  {isBookMode && bookChapters.length > 0 && (
-                    <div style={{
-                      fontFamily: '"Cormorant Garamond", serif',
-                      fontSize: 15, fontWeight: 400, color: 'var(--text-muted)',
-                      marginTop: 4, fontStyle: 'italic',
-                    }}>
-                      {bookChapters.length} sections \u2014 Gujarati to English
-                    </div>
-                  )}
-                  {!isBookMode && (
-                    <div style={{
-                      fontFamily: '"Cormorant Garamond", serif',
-                      fontSize: 15, fontWeight: 400, color: 'var(--text-muted)',
-                      marginTop: 4, fontStyle: 'italic',
-                    }}>
-                      Gujarati to English Translation
-                    </div>
-                  )}
-                  <div style={{ width: 60, height: 1, background: 'var(--border)', margin: '20px auto 0' }} />
+                  <div className="font-serif italic text-sm text-muted-foreground mt-1">
+                    {isBookMode && bookChapters.length > 0
+                      ? `${bookChapters.length} sections — Gujarati to English`
+                      : 'Gujarati to English Translation'}
+                  </div>
+                  <div className="w-14 h-px bg-border mx-auto mt-5" />
                 </div>
 
-                {/* Document body — collapsible */}
-                <div style={{
-                  position: 'relative',
-                  maxHeight: outputExpanded ? 'none' : 320,
-                  overflow: 'hidden',
-                  transition: 'max-height 0.3s ease',
-                }}>
+                {/* Document body — collapsible with fade overlay */}
+                <div className={cn(
+                  'relative overflow-hidden transition-[max-height] duration-300',
+                  outputExpanded ? 'max-h-none' : 'max-h-80',
+                )}>
                   <OutputView
                     output={output}
                     onCommentClick={(sectionIndex) => {
@@ -1561,72 +1426,58 @@ function HomeInner() {
                     commentCounts={commentCounts}
                   />
                   {!outputExpanded && (
-                    <div style={{
-                      position: 'absolute', bottom: 0, left: 0, right: 0, height: 100,
-                      background: 'linear-gradient(transparent, #fff)',
-                      pointerEvents: 'none',
-                    }} />
+                    <div className="pointer-events-none absolute inset-x-0 bottom-0 h-24 bg-gradient-to-b from-transparent to-paper" />
                   )}
                 </div>
                 <button
+                  type="button"
                   onClick={() => setOutputExpanded(prev => !prev)}
-                  style={{
-                    display: 'block', width: '100%', padding: '12px 0', marginTop: 8,
-                    border: 'none', background: 'transparent', cursor: 'pointer',
-                    fontFamily: "'Karla', sans-serif", fontSize: 11, fontWeight: 600,
-                    letterSpacing: 1, textTransform: 'uppercase', color: 'var(--text-light)',
-                    transition: 'color 0.2s',
-                  }}
+                  className="block w-full mt-3 min-h-[44px] font-mono text-[11px] uppercase tracking-wider text-muted-foreground hover:text-foreground transition-colors"
                 >
-                  {outputExpanded ? '\u25B2 Collapse translation' : '\u25BC Expand full translation'}
+                  {outputExpanded ? '▲ Collapse translation' : '▼ Expand full translation'}
                 </button>
 
                 {/* Footer */}
-                <div style={{ marginTop: 32, paddingTop: 16, borderTop: '1px solid var(--border-light)', textAlign: 'center' }}>
-                  <span style={{ fontSize: 10, fontWeight: 500, letterSpacing: 2, textTransform: 'uppercase', color: 'var(--text-light)' }}>
+                <div className="mt-8 pt-4 border-t border-border/60 text-center">
+                  <span className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground/70">
                     Aksharpith Translation Pipeline
                   </span>
                 </div>
               </div>
 
-              {/* Quality summary below document */}
+              {/* Quality summary below document — corrections only; reviewer
+                  metrics are admin-only and live at /admin */}
               <QualitySummary
                 corrections={enforcerCorrections}
-                reviewerSummary={reviewerSummary}
                 totalFixes={enforcerTotalFixes}
               />
 
-              {/* Actions */}
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ fontSize: 12, fontWeight: 300, color: 'var(--text-muted)' }}>
-                    {outputMeta.words.toLocaleString()} words
-                  </span>
-                  <span style={{ color: 'var(--border)' }}>{'\u00b7'}</span>
-                  <span style={{ fontSize: 12, fontWeight: 300, color: 'var(--text-muted)' }}>
+              {/* Actions — wraps to two rows on mobile */}
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex items-center flex-wrap gap-x-2.5 gap-y-1 text-xs text-muted-foreground">
+                  <span>{outputMeta.words.toLocaleString()} words</span>
+                  <span className="text-border">·</span>
+                  <span>
                     {outputMeta.chunkCount} section{outputMeta.chunkCount !== 1 ? 's' : ''}
                   </span>
-                  {outputMeta.avg > 0 && (
+                  {outputMeta.flagsCount > 0 && (
                     <>
-                      <span style={{ color: 'var(--border)' }}>{'\u00b7'}</span>
-                      <span style={{
-                        fontSize: 11, fontWeight: 600, letterSpacing: 0.5,
-                        color: outputMeta.avg >= 90 ? 'var(--green)' : outputMeta.avg >= 80 ? 'var(--amber)' : 'var(--red)',
-                      }}>
-                        {outputMeta.avg}% quality
+                      <span className="text-border">·</span>
+                      <span className="font-mono">
+                        {outputMeta.flagsCount} self-flag{outputMeta.flagsCount === 1 ? '' : 's'}
                       </span>
                     </>
                   )}
                 </div>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <button onClick={handleCopy} style={{
-                    padding: '8px 16px', border: '1px solid var(--border)', borderRadius: 6,
-                    background: 'var(--bg-white)', color: 'var(--text-muted)',
-                    fontFamily: "'Karla', sans-serif", fontSize: 11, fontWeight: 600,
-                    letterSpacing: '1px', textTransform: 'uppercase', cursor: 'pointer',
-                  }}>
-                    {copied ? '\u2713 Copied' : 'Copy'}
-                  </button>
+                <div className="flex gap-2 self-start sm:self-auto">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleCopy}
+                    className="min-h-[44px] sm:min-h-0 font-mono text-[11px] uppercase tracking-wider"
+                  >
+                    {copied ? '✓ Copied' : 'Copy'}
+                  </Button>
                   <DownloadMenu
                     output={output}
                     translationId={translationId}

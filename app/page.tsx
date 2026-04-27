@@ -1,8 +1,10 @@
 'use client';
 
 import { useState, useRef, useCallback, useEffect, Suspense } from 'react';
+import { doc, onSnapshot } from 'firebase/firestore';
 import { useAuth } from '../lib/auth-context';
 import { useRouter, useSearchParams } from 'next/navigation';
+import { getFirebaseDb } from '../lib/firebase';
 import OutputView from './components/OutputView';
 import DocumentRenderer from './components/DocumentRenderer';
 import ReviewPanel from './components/ReviewPanel';
@@ -928,6 +930,129 @@ function HomeInner() {
     return result;
   };
 
+  // ── Server-side book enqueue ───────────────────────────────────────────────
+  // POST all chapters at once; subscribe to each via Firestore onSnapshot.
+  // No client-side for-loop: closing the browser tab no longer stops the book.
+  const runBookViaServerEnqueue = async (
+    chapterArr: Array<{ chapterIndex: number; chapterTitle: string; text: string }>,
+    bookId: string,
+    bookTitle?: string,
+  ): Promise<string[]> => {
+    const token = await getIdToken();
+    const res = await fetch('/api/translate-book', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(token ? { 'Authorization': `Bearer ${token}` } : {}) },
+      body: JSON.stringify({ bookId, bookTitle, chapters: chapterArr }),
+      signal: abortRef.current?.signal,
+    });
+    if (!res.ok) {
+      const err = await res.text().catch(() => `HTTP ${res.status}`);
+      throw new Error(err);
+    }
+    const { chapterJobs } = (await res.json()) as {
+      chapterJobs: Array<{ chapterIndex: number; jobId: string }>;
+    };
+
+    setProcessingMode('local');
+    updateStage('chunker', { status: 'running', msg: `${chapterJobs.length} chapter jobs queued — worker is picking them up…` });
+
+    const db = getFirebaseDb();
+    const outputs: string[] = new Array(chapterArr.length).fill('');
+    type SnapState = {
+      status: 'pending' | 'running' | 'completed' | 'failed';
+      result: { output?: string; avgScore?: number; wordCount?: number } | null;
+      progress: Record<string, unknown> | null;
+    };
+    const states = new Map<number, SnapState>();
+
+    return new Promise<string[]>((resolve, reject) => {
+      const unsubs: Array<() => void> = [];
+      let aborted = false;
+
+      const onAbort = () => {
+        aborted = true;
+        unsubs.forEach((u) => u());
+        reject(new DOMException('Aborted', 'AbortError'));
+      };
+      abortRef.current?.signal.addEventListener('abort', onAbort);
+
+      for (const { chapterIndex, jobId } of chapterJobs) {
+        const ref = doc(db, 'jobs', jobId);
+        const unsub = onSnapshot(
+          ref,
+          (snap) => {
+            if (aborted) return;
+            const data = snap.data() as Record<string, unknown> | undefined;
+            if (!data) return;
+
+            const status = data.status as SnapState['status'];
+            const r = (data.result ?? null) as SnapState['result'];
+            const progress = (data.progress ?? null) as SnapState['progress'];
+            const inputObj = (data.input ?? {}) as { wordCount?: number };
+
+            states.set(chapterIndex, { status, result: r, progress });
+
+            const uiStatus =
+              status === 'completed' ? ('done' as const) :
+              status === 'failed' ? ('error' as const) :
+              status as 'pending' | 'running';
+
+            setBookChapters((prev) =>
+              prev.map((c, i) =>
+                i === chapterIndex
+                  ? {
+                      ...c,
+                      status: uiStatus,
+                      output: r?.output ?? c.output,
+                      avgScore: r?.avgScore ?? c.avgScore,
+                      wordCount: r?.wordCount ?? inputObj.wordCount ?? c.wordCount,
+                    }
+                  : c,
+              ),
+            );
+
+            if (status === 'completed' && r?.output) {
+              outputs[chapterIndex] = r.output;
+              setBookOutputs([...outputs]);
+            }
+
+            // Mirror the live pipeline UI to whichever chapter is running first in queue order
+            const runningSorted = Array.from(states.entries())
+              .filter(([, s]) => s.status === 'running')
+              .sort(([a], [b]) => a - b);
+            if (runningSorted.length > 0) {
+              const [idx, s] = runningSorted[0];
+              setCurrentChapterIdx(idx);
+              if (s.progress) applyProgress(s.progress as Parameters<typeof applyProgress>[0]);
+            }
+
+            if (states.size === chapterJobs.length) {
+              const allFinished = Array.from(states.values()).every(
+                (s) => s.status === 'completed' || s.status === 'failed',
+              );
+              if (allFinished) {
+                unsubs.forEach((u) => u());
+                abortRef.current?.signal.removeEventListener('abort', onAbort);
+                const failed = Array.from(states.entries()).filter(([, s]) => s.status === 'failed');
+                if (failed.length > 0) {
+                  const labels = failed.map(([i]) => `chapter ${i + 1}`).join(', ');
+                  setPipelineError(`Some chapters failed: ${labels}. See /admin for details.`);
+                }
+                resolve(outputs);
+              }
+            }
+          },
+          (err) => {
+            unsubs.forEach((u) => u());
+            abortRef.current?.signal.removeEventListener('abort', onAbort);
+            reject(new Error(`Firestore snapshot error: ${err.message}`));
+          },
+        );
+        unsubs.push(unsub);
+      }
+    });
+  };
+
   // ── Handle run ─────────────────────────────────────────────────────────────
 
   const handleRun = async () => {
@@ -958,44 +1083,39 @@ function HomeInner() {
 
     try {
       if (isBookMode && bookChapters.length > 0) {
-        // Reset all chapter statuses to pending for new run
         setBookChapters(prev => prev.map(c => ({ ...c, status: 'pending' as const, output: undefined, avgScore: undefined, wordCount: undefined })));
         const bookRunId = crypto.randomUUID();
-        const allOutputs: string[] = new Array(bookChapters.length).fill('');
         const chapterLines = inputText.split('\n');
 
-        for (let i = 0; i < bookChapters.length; i++) {
-          setCurrentChapterIdx(i);
-          setBookChapters(prev => prev.map((c, j) => j === i ? { ...c, status: 'running' } : c));
+        // Build chapter array for the server endpoint.
+        const chapterArr = bookChapters.map((bc, i) => {
+          const start = bc.startLine ?? 0;
+          const end   = bookChapters[i + 1]?.startLine ?? chapterLines.length;
+          return { chapterIndex: i, chapterTitle: bc.title, text: chapterLines.slice(start, end).join('\n').trim() };
+        }).filter(c => c.text);
 
-          const start  = bookChapters[i].startLine ?? 0;
-          const end    = bookChapters[i + 1]?.startLine ?? chapterLines.length;
-          const chText = chapterLines.slice(start, end).join('\n').trim();
-
-          if (!chText) {
-            setBookChapters(prev => prev.map((c, j) => j === i ? { ...c, status: 'done', output: '' } : c));
-            continue;
-          }
-
+        if (chapterArr.length === 0) {
+          setPipelineError('No non-empty chapters detected in the upload');
+        } else {
           try {
-            const res = await runSection(chText, bookChapters[i].title, bookRunId, i, bookChapters.length);
-            if (res) {
-              allOutputs[i] = res.output;
-              setBookOutputs([...allOutputs]);
-              setBookChapters(prev => prev.map((c, j) => j === i ? { ...c, status: 'done', output: res.output, avgScore: res.avg, wordCount: res.wordCount } : c));
-            }
+            const outputs = await runBookViaServerEnqueue(chapterArr, bookRunId, uploadedFilename || undefined);
+            const combined = outputs.filter(Boolean).join('\n\n');
+            setOutput(combined);
+            setOutputMeta({
+              words: wc(combined),
+              chunkCount: chapterArr.length,
+              avg: Math.round(
+                bookChapters.filter(c => c.avgScore).reduce((s, c) => s + (c.avgScore ?? 0), 0) /
+                Math.max(1, bookChapters.filter(c => c.avgScore).length),
+              ),
+            });
+            if (combined) setTimeout(() => setTab('output'), 400);
           } catch (e) {
-            const msg = e instanceof Error ? e.message : 'Error';
-            setBookChapters(prev => prev.map((c, j) => j === i ? { ...c, status: 'error' } : c));
-            setPipelineError(`Chapter "${bookChapters[i].title}" failed: ${msg}`);
-            break;
+            if ((e as Error).name !== 'AbortError') {
+              setPipelineError(`Book translation failed: ${(e as Error).message}`);
+            }
           }
         }
-
-        const combined = allOutputs.filter(Boolean).join('\n\n');
-        setOutput(combined);
-        setOutputMeta({ words: wc(combined), chunkCount: bookChapters.length, avg: Math.round(bookChapters.filter(c => c.avgScore).reduce((s, c) => s + (c.avgScore ?? 0), 0) / Math.max(1, bookChapters.filter(c => c.avgScore).length)) });
-        if (combined) setTimeout(() => setTab('output'), 400);
 
       } else {
         const res = await runSection(inputText);

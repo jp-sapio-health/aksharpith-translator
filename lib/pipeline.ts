@@ -1,6 +1,5 @@
 import https from 'node:https';
 import {
-  PROTECTED_TERMS,
   TERMINOLOGY_RULES,
   PERSONAL_NAME_RULES,
   PLACE_NAME_RULES,
@@ -13,22 +12,27 @@ import {
   buildSmootherSystem,
 } from './rules';
 import type { RulesCorrection } from './rules';
-import type { PipelineInput, PipelineAuth, ProgressReporter, ChunkProgress, JobProgress } from './job-types';
+import type { PipelineInput, PipelineAuth, ProgressReporter, ChunkProgress } from './job-types';
+import { parseTranslator, parseSmoother, ParserError } from './parser';
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 const SONNET = 'claude-sonnet-4-20250514';
 const BATCH  = 5;
-const RECHECK_THRESHOLD = 96;
-const MAX_REVIEW_ROUNDS = 2;
 const API_TIMEOUT_MS    = 90_000;
 const MAX_RETRIES       = 1;
+
+// Optional admin-only telemetry: when ENABLE_REVIEWER_TELEMETRY=true, the
+// pipeline asynchronously runs the deprecated reviewer once per chunk and
+// stores the score under translations/<id>.adminTelemetry.reviewerScore. The
+// result is never returned to user-facing endpoints.
+const ENABLE_REVIEWER_TELEMETRY = process.env.ENABLE_REVIEWER_TELEMETRY === 'true';
 
 // ─── Build prompts once ──────────────────────────────────────────────────────
 
 const TRANSLATOR_SYSTEM = buildTranslatorSystem();
+const SMOOTHER_SYSTEM   = buildSmootherSystem();
 const REVIEWER_SYSTEM   = buildReviewerSystem();
-const SMOOTHER_SYSTEM   = buildSmootherSystem(PROTECTED_TERMS);
 
 // ─── Anthropic API helper ────────────────────────────────────────────────────
 
@@ -102,25 +106,12 @@ async function callClaude(params: {
   throw new Error('Max retries exceeded');
 }
 
-// ─── Parallel batch helper ──────────────────────────────────────────────────
-
-async function parallelBatch<T>(
-  items: T[], fn: (item: T, index: number) => Promise<void>, batchSize: number,
-): Promise<void> {
-  for (let start = 0; start < items.length; start += batchSize) {
-    const batch = items.slice(start, start + batchSize);
-    const results = await Promise.allSettled(batch.map((item, bi) => fn(item, start + bi)));
-    const firstFailure = results.find(r => r.status === 'rejected');
-    if (firstFailure && firstFailure.status === 'rejected') throw firstFailure.reason;
-  }
-}
-
 // ─── Deterministic chunker ──────────────────────────────────────────────────
 
 function isVerseBlock(para: string): boolean {
   const lines = para.split('\n').map(l => l.trim()).filter(Boolean);
   if (lines.length < 2) return false;
-  const quotedVerse = lines.some(l => /^[\u201c\u201d"'\u2018\u2019]/.test(l) && /[āīūṛṅñṭḍṇśṣḥ]/.test(l));
+  const quotedVerse = lines.some(l => /^[“”"'‘’]/.test(l) && /[āīūṛṅñṭḍṇśṣḥ]/.test(l));
   const avgLen = lines.reduce((s, l) => s + l.length, 0) / lines.length;
   const similarLength = lines.length >= 2 && lines.every(l => Math.abs(l.length - avgLen) < avgLen * 0.5);
   const diacriticLines = lines.filter(l => /[āīūṛṅñṭḍṇśṣḥ]/.test(l)).length;
@@ -191,16 +182,43 @@ function deterministicChunk(text: string): string[] {
 
 // ─── Agent functions ────────────────────────────────────────────────────────
 
+/**
+ * Translator agent — returns the sadhu's-chain output: an English translation
+ * plus translator self-flags for any low-confidence span. XML output contract,
+ * strict parser. Throws ParserError if the model returns malformed XML.
+ */
 async function translatorAgent(
   apiKey: string, chunk: string, chunkIndex: number, totalChunks: number,
-): Promise<string> {
-  return callClaude({
+): Promise<{ translation: string; flags: string[] }> {
+  const raw = await callClaude({
     model: SONNET, max_tokens: 8192, apiKey,
     system: TRANSLATOR_SYSTEM,
-    messages: [{ role: 'user', content: `Chunk ${chunkIndex + 1} of ${totalChunks}. Translate the following Gujarati text to English. For any verse or poetry, you MUST include the Roman transliteration in curly quotes first, then the English meaning in parentheses — both are mandatory. Provide ONLY the translated output (no preamble or notes).\n\nGUJARATI:\n${chunk}` }],
+    messages: [{ role: 'user', content: `Chunk ${chunkIndex + 1} of ${totalChunks}. Translate the following Gujarati text into English following the rules above. For verse or poetic lines, include the Roman transliteration in curly quotes first, then the English meaning in parentheses — both mandatory. Output ONLY the two XML blocks specified in the system prompt: <translation>…</translation><flags>…</flags>.\n\nGUJARATI:\n${chunk}` }],
   });
+  return parseTranslator(raw);
 }
 
+/**
+ * Smoother agent — Prompt 4 verbatim. Strict <smoothed> XML output. The
+ * earlier wordDiffRatio guardrail ("preserve 90% of words") is gone; the
+ * "What to never change" list inside the prompt is the safeguard. If the
+ * model returns malformed XML, ParserError is thrown and the chunk falls
+ * back to the unsmoothed translator output (handled by the caller).
+ */
+async function smootherAgent(apiKey: string, text: string): Promise<{ smoothed: string }> {
+  const raw = await callClaude({
+    model: SONNET, max_tokens: 8192, apiKey,
+    system: SMOOTHER_SYSTEM,
+    messages: [{ role: 'user', content: `Smooth the following passage per the rules above. Output ONLY <smoothed>…</smoothed>.\n\n${text}` }],
+  });
+  return parseSmoother(raw);
+}
+
+/**
+ * @deprecated Not on the critical path. Kept for one PR cycle as revert
+ * insurance and as the source for optional admin-only telemetry. Do NOT call
+ * from any user-facing code path. Its output never reaches the user response.
+ */
 interface ReviewResult {
   categories: Array<{ id: string; weight: number; score: number; deductions: string[]; pass: boolean }>;
   pitfalls: string[];
@@ -210,6 +228,7 @@ interface ReviewResult {
   certifiable: boolean;
 }
 
+/** @deprecated — see ReviewResult. Admin-telemetry only. */
 async function reviewerAgent(apiKey: string, original: string, translation: string): Promise<ReviewResult> {
   const fallback: ReviewResult = { categories: [], pitfalls: [], issues: [], score: 50, revised: translation, certifiable: false };
   let raw: string;
@@ -279,33 +298,6 @@ async function reviewerAgent(apiKey: string, original: string, translation: stri
   }
 }
 
-function wordDiffRatio(a: string, b: string): number {
-  const wordsA = a.split(/\s+/).filter(Boolean);
-  const wordsB = b.split(/\s+/).filter(Boolean);
-  const maxLen = Math.max(wordsA.length, wordsB.length);
-  if (maxLen === 0) return 0;
-  // Build word frequency map and count differences
-  const freq: Record<string, number> = {};
-  for (const w of wordsA) freq[w] = (freq[w] ?? 0) + 1;
-  for (const w of wordsB) freq[w] = (freq[w] ?? 0) - 1;
-  const changed = Object.values(freq).reduce((s, v) => s + Math.abs(v), 0) / 2;
-  return changed / maxLen;
-}
-
-async function smootherAgent(apiKey: string, text: string): Promise<{ text: string; flagged: boolean }> {
-  const smoothed = await callClaude({
-    model: SONNET, max_tokens: 8192, apiKey,
-    system: SMOOTHER_SYSTEM,
-    messages: [{ role: 'user', content: `Perform the readability pass. Return ONLY the revised text.\n\n${text}` }],
-  });
-  const diffRatio = wordDiffRatio(text, smoothed);
-  if (diffRatio > 0.15) {
-    console.warn(`Smoother changed ${(diffRatio * 100).toFixed(1)}% of words (>15%). Using original.`);
-    return { text, flagged: true };
-  }
-  return { text: smoothed, flagged: false };
-}
-
 function assemblerAgent(smoothedChunks: string[]): string {
   if (smoothedChunks.length <= 1) return smoothedChunks[0] ?? '';
   const result: string[] = [];
@@ -359,27 +351,35 @@ export function rulesEnforcerAgent(text: string): { text: string; corrections: R
 
   let openDouble = true;
   const bq = t;
-  t = t.replace(/"/g, () => { const q = openDouble ? '\u201c' : '\u201d'; openDouble = !openDouble; return q; });
-  if (t !== bq) corrections.push({ from: '"', to: '\u201c/\u201d', rule: 'straight quotes\u2192curly quotes', count: (bq.match(/"/g) || []).length });
+  t = t.replace(/"/g, () => { const q = openDouble ? '“' : '”'; openDouble = !openDouble; return q; });
+  if (t !== bq) corrections.push({ from: '"', to: '“/”', rule: 'straight quotes→curly quotes', count: (bq.match(/"/g) || []).length });
   const bs = t;
-  t = t.replace(/'([^']{2,})'/g, '\u2018$1\u2019');
-  if (t !== bs) corrections.push({ from: "'x'", to: '\u2018x\u2019', rule: 'straight single quotes\u2192curly', count: 1 });
+  t = t.replace(/'([^']{2,})'/g, '‘$1’');
+  if (t !== bs) corrections.push({ from: "'x'", to: '‘x’', rule: 'straight single quotes→curly', count: 1 });
 
   const bd = t;
-  t = t.replace(/\u2014/g, ' \u2013 ');
-  t = t.replace(/ {2,}\u2013 {2,}/g, ' \u2013 ');
-  if (t !== bd) corrections.push({ from: '\u2014', to: ' \u2013 ', rule: 'em dash\u2192spaced en dash', count: (bd.match(/\u2014/g) || []).length });
+  t = t.replace(/—/g, ' – ');
+  t = t.replace(/ {2,}– {2,}/g, ' – ');
+  if (t !== bd) corrections.push({ from: '—', to: ' – ', rule: 'em dash→spaced en dash', count: (bd.match(/—/g) || []).length });
 
   for (const [from, to] of Object.entries(DIACRITICS_MAP)) {
     const before = t;
     t = t.split(from).join(to);
-    if (t !== before) corrections.push({ from, to, rule: 'forbidden diacritics stripped (only \u0101 permitted)', count: before.split(from).length - 1 });
+    if (t !== before) corrections.push({ from, to, rule: 'forbidden diacritics stripped (only ā permitted)', count: before.split(from).length - 1 });
   }
 
   return { text: t, corrections, totalFixes: corrections.reduce((s, c) => s + c.count, 0) };
 }
 
 // ─── Main Pipeline ──────────────────────────────────────────────────────────
+//
+// Sadhu-approved chain (PR 3):
+//   chunker → translator → smoother → enforcer → assembler
+//
+// Reviewer is no longer on the critical path. When ENABLE_REVIEWER_TELEMETRY
+// is 'true', each chunk fires off a non-blocking reviewer call whose result is
+// written to Firestore under translations/<id>.adminTelemetry.reviewerScore
+// for the /admin dashboard. It never reaches the user-facing response.
 
 export async function runPipeline(
   input: PipelineInput,
@@ -392,7 +392,6 @@ export async function runPipeline(
 
   const { text, chapterTitle, bookId, bookTitle, chapterIndex, totalChapters } = input;
 
-  // Helper to build chunk progress array
   const chunkProgressArr: ChunkProgress[] = [];
 
   // ── Stage 1: Chunker ──────────────────────────────────────────────────
@@ -407,27 +406,25 @@ export async function runPipeline(
 
   await reportProgress({ progress: { currentStage: 'translator', stages: { chunker: { status: 'done', chunkCount: chunks.length } }, chunks: chunkProgressArr } });
 
-  // ── Stages 2-4: Pipelined per-chunk ───────────────────────────────────
+  // ── Stages 2-3: Pipelined per-chunk (translator → smoother) ────────────
   const translations: string[] = new Array(chunks.length).fill('');
-  const reviews: ReviewResult[] = new Array(chunks.length);
+  const chunkFlags: string[][] = Array.from({ length: chunks.length }, () => []);
   const smoothedChunks: string[] = new Array(chunks.length).fill('');
 
+  // Optional admin-only telemetry — fire-and-forget, settled at the end.
+  const reviewerTelemetry: Array<Promise<{ index: number; score: number; certifiable: boolean }>> = [];
+
   const chunkDataForStorage: Array<{
-    index: number; originalGujarati: string; translation: string;
-    reviewerScore: number; reviewerCategories: Array<{ id: string; score: number; weight: number }>; certifiable: boolean;
+    index: number; originalGujarati: string; translation: string; flags: string[];
   }> = [];
 
-  let translateDone = 0, reviewDone = 0, smoothDone = 0;
-  let totalRechecks = 0;
-  let smootherFlagged = 0;
+  let translateDone = 0, smoothDone = 0;
 
-  // Helper to build current stage progress snapshot
   function stageSnapshot() {
     return {
       chunker: { status: 'done' as const, chunkCount: chunks.length },
       translator: { status: (translateDone >= chunks.length ? 'done' : 'running') as 'done' | 'running', completed: translateDone, total: chunks.length },
-      reviewer: { status: (reviewDone >= chunks.length ? 'done' : (reviewDone > 0 || translateDone > 0 ? 'running' : 'waiting')) as 'done' | 'running' | 'waiting', completed: reviewDone, total: chunks.length, rechecked: totalRechecks, certCount: reviews.filter(r => r?.certifiable).length, avgScore: reviewDone > 0 ? Math.round(reviews.filter(Boolean).reduce((s, r) => s + r.score, 0) / reviewDone) : 0 },
-      smoother: { status: (smoothDone >= chunks.length ? 'done' : (smoothDone > 0 || reviewDone > 0 ? 'running' : 'waiting')) as 'done' | 'running' | 'waiting', completed: smoothDone, total: chunks.length, flaggedChunks: smootherFlagged },
+      smoother: { status: (smoothDone >= chunks.length ? 'done' : (smoothDone > 0 || translateDone > 0 ? 'running' : 'waiting')) as 'done' | 'running' | 'waiting', completed: smoothDone, total: chunks.length },
     };
   }
 
@@ -435,55 +432,57 @@ export async function runPipeline(
     const chunkLabel = chunks.length === 1 ? '' : ` chunk ${i + 1}/${chunks.length}`;
     const srcWords = chunks[i].split(/\s+/).length;
 
-    // Translate
-    await reportProgress({ progress: { currentStage: 'translator', commentary: `Translating${chunkLabel} (${srcWords} words) with full Aksharpith style context\u2026`, stages: stageSnapshot(), chunks: chunkProgressArr } });
-    translations[i] = rulesEnforcerAgent(await translatorAgent(apiKey!, chunks[i], i, chunks.length)).text;
+    // Translate (XML output: <translation> + <flags>)
+    await reportProgress({ progress: { currentStage: 'translator', commentary: `Translating${chunkLabel} (${srcWords} words) with full Aksharpith style context…`, stages: stageSnapshot(), chunks: chunkProgressArr } });
+    const translatorOut = await translatorAgent(apiKey!, chunks[i], i, chunks.length);
+    translations[i] = rulesEnforcerAgent(translatorOut.translation).text;
+    chunkFlags[i] = translatorOut.flags;
     translateDone++;
-    chunkProgressArr[i] = { ...chunkProgressArr[i], translation: translations[i].slice(0, 300) };
-    await reportProgress({ progress: { currentStage: 'translator', commentary: `Translated${chunkLabel} \u2014 ${translations[i].split(/\s+/).length} words output`, stages: stageSnapshot(), chunks: chunkProgressArr } });
-
-    // Review
-    await reportProgress({ progress: { currentStage: 'reviewer', commentary: `Scoring${chunkLabel} against 6-category weighted rubric\u2026`, stages: stageSnapshot(), chunks: chunkProgressArr } });
-    reviews[i] = await reviewerAgent(apiKey!, chunks[i], translations[i]);
-    const chunkScoreHistory = [reviews[i].score];
-    let chunkReviewRound = 1;
-    for (let round = 1; round <= MAX_REVIEW_ROUNDS && reviews[i].score < RECHECK_THRESHOLD; round++) {
-      totalRechecks++;
-      chunkReviewRound++;
-      await reportProgress({ progress: { currentStage: 'reviewer', commentary: `Re-reviewing${chunkLabel} \u2014 score ${reviews[i].score}% below ${RECHECK_THRESHOLD}% threshold, round ${chunkReviewRound}\u2026`, stages: stageSnapshot(), chunks: chunkProgressArr } });
-      reviews[i] = await reviewerAgent(apiKey!, chunks[i], reviews[i].revised);
-      chunkScoreHistory.push(reviews[i].score);
-    }
-    reviewDone++;
-
     chunkProgressArr[i] = {
       ...chunkProgressArr[i],
-      score: reviews[i].score,
-      certifiable: reviews[i].certifiable,
-      categories: reviews[i].categories,
-      pitfalls: reviews[i].pitfalls,
-      issues: reviews[i].issues,
-      scoreHistory: chunkScoreHistory,
-      reviewRound: chunkReviewRound,
+      translation: translations[i].slice(0, 300),
+      flags: translatorOut.flags,
     };
-    await reportProgress({ progress: { currentStage: 'reviewer', commentary: `Reviewed${chunkLabel} \u2014 score ${reviews[i].score}%${reviews[i].certifiable ? ' (certified)' : ''}`, stages: stageSnapshot(), chunks: chunkProgressArr } });
+    const flagSummary = translatorOut.flags.length === 0
+      ? 'no self-flags'
+      : `${translatorOut.flags.length} self-flag${translatorOut.flags.length === 1 ? '' : 's'}`;
+    await reportProgress({ progress: { currentStage: 'translator', commentary: `Translated${chunkLabel} — ${translations[i].split(/\s+/).length} words output, ${flagSummary}`, stages: stageSnapshot(), chunks: chunkProgressArr } });
+
+    // Optional admin-only reviewer telemetry — never blocks user-facing path.
+    if (ENABLE_REVIEWER_TELEMETRY) {
+      reviewerTelemetry.push(
+        reviewerAgent(apiKey!, chunks[i], translations[i])
+          .then(r => ({ index: i, score: r.score, certifiable: r.certifiable }))
+          .catch(err => {
+            console.error(`[telemetry] reviewer failed for chunk ${i}:`, err instanceof Error ? err.message : err);
+            return { index: i, score: -1, certifiable: false };
+          }),
+      );
+    }
+
+    // Smoother (XML output: <smoothed>). On parser/model failure, fall back
+    // to the unsmoothed translator output rather than corrupting the chunk.
+    await reportProgress({ progress: { currentStage: 'smoother', commentary: `Smoothing${chunkLabel} — preserving direct quotes, transliterated verses and proper nouns…`, stages: stageSnapshot(), chunks: chunkProgressArr } });
+    let smoothedText = translations[i];
+    let smootherFallback = false;
+    try {
+      const smoothed = await smootherAgent(apiKey!, translations[i]);
+      smoothedText = smoothed.smoothed;
+    } catch (err) {
+      smootherFallback = true;
+      const message = err instanceof ParserError ? err.message : (err instanceof Error ? err.message : 'unknown');
+      console.warn(`[pipeline] Smoother fallback on chunk ${i}: ${message}`);
+    }
+    smoothedChunks[i] = rulesEnforcerAgent(smoothedText).text;
+    smoothDone++;
+    await reportProgress({ progress: { currentStage: 'smoother', commentary: `Smoothed${chunkLabel}${smootherFallback ? ' (fell back to translator output)' : ''}`, stages: stageSnapshot(), chunks: chunkProgressArr } });
 
     chunkDataForStorage.push({
-      index: i, originalGujarati: chunks[i], translation: reviews[i].revised,
-      reviewerScore: reviews[i].score,
-      reviewerCategories: reviews[i].categories.map(c => ({ id: c.id, score: c.score, weight: c.weight })),
-      certifiable: reviews[i].certifiable,
+      index: i,
+      originalGujarati: chunks[i],
+      translation: smoothedChunks[i],
+      flags: translatorOut.flags,
     });
-
-    // Smooth
-    await reportProgress({ progress: { currentStage: 'smoother', commentary: `Readability pass on${chunkLabel} \u2014 preserving terminology and direct quotes\u2026`, stages: stageSnapshot(), chunks: chunkProgressArr } });
-    const smoothResult = await smootherAgent(apiKey!, reviews[i].revised);
-    const chunkEnforced = rulesEnforcerAgent(smoothResult.text);
-    smoothedChunks[i] = chunkEnforced.text;
-    if (smoothResult.flagged) smootherFlagged++;
-    smoothDone++;
-    chunkProgressArr[i] = { ...chunkProgressArr[i], flagged: smoothResult.flagged };
-    await reportProgress({ progress: { currentStage: 'smoother', commentary: `Smoothed${chunkLabel}${smoothResult.flagged ? ' (flagged \u2014 using original)' : ''}`, stages: stageSnapshot(), chunks: chunkProgressArr } });
   }
 
   // Process in batches — report progress after each batch
@@ -494,49 +493,43 @@ export async function runPipeline(
     const firstFailure = results.find(r => r.status === 'rejected');
     if (firstFailure && firstFailure.status === 'rejected') throw firstFailure.reason;
 
-    // Report batch completion
-    const currentStage = smoothDone === chunks.length ? 'assembler' : reviewDone > translateDone ? 'smoother' : translateDone > 0 ? 'reviewer' : 'translator';
+    const currentStage = smoothDone === chunks.length
+      ? 'assembler'
+      : translateDone > 0 ? 'smoother' : 'translator';
     await reportProgress({
       progress: {
         currentStage,
-        stages: {
-          chunker: { status: 'done', chunkCount: chunks.length },
-          translator: { status: translateDone >= chunks.length ? 'done' : 'running', completed: translateDone, total: chunks.length },
-          reviewer: { status: reviewDone >= chunks.length ? 'done' : 'running', completed: reviewDone, total: chunks.length, rechecked: totalRechecks, certCount: reviews.filter(r => r?.certifiable).length, avgScore: reviewDone > 0 ? Math.round(reviews.filter(Boolean).reduce((s, r) => s + r.score, 0) / reviewDone) : 0 },
-          smoother: { status: smoothDone >= chunks.length ? 'done' : 'running', completed: smoothDone, total: chunks.length, flaggedChunks: smootherFlagged },
-        },
+        stages: stageSnapshot(),
         chunks: chunkProgressArr,
       },
     });
   }
 
-  // ── Stage 5: Assembler (deterministic) ────────────────────────────────
-  await reportProgress({ progress: { currentStage: 'assembler', commentary: `Joining ${chunks.length} chunks into a single document \u2014 deduplicating boundary overlaps\u2026`, stages: { assembler: { status: 'running' } }, chunks: chunkProgressArr } });
+  // ── Stage 4: Assembler (deterministic) ────────────────────────────────
+  await reportProgress({ progress: { currentStage: 'assembler', commentary: `Joining ${chunks.length} chunks into a single document — deduplicating boundary overlaps…`, stages: { assembler: { status: 'running' } }, chunks: chunkProgressArr } });
   const assembled = assemblerAgent(smoothedChunks);
   await reportProgress({ progress: { currentStage: 'enforcer', commentary: 'Document assembled successfully', stages: { assembler: { status: 'done' } }, chunks: chunkProgressArr } });
 
-  // ── Stage 6: Rules Enforcer (deterministic) ───────────────────────────
-  await reportProgress({ progress: { currentStage: 'enforcer', commentary: 'Running deterministic rules \u2014 terminology, punctuation, diacritics, place names\u2026', stages: { enforcer: { status: 'running' } }, chunks: chunkProgressArr } });
+  // ── Stage 5: Rules Enforcer (deterministic) ───────────────────────────
+  await reportProgress({ progress: { currentStage: 'enforcer', commentary: 'Running deterministic rules — terminology, punctuation, diacritics, place names…', stages: { enforcer: { status: 'running' } }, chunks: chunkProgressArr } });
   const enforced = rulesEnforcerAgent(assembled);
   const finalText = enforced.text;
   const finalWords = finalText.trim().split(/\s+/).filter(Boolean).length;
-  const avgScore = chunks.length > 0 ? reviews.reduce((s, r) => s + r.score, 0) / chunks.length : 0;
+  const totalFlags = chunkFlags.reduce((s, f) => s + f.length, 0);
 
-  const reviewerSummary = {
-    avgScore: Math.round(avgScore),
-    certifiedCount: reviews.filter(r => r.certifiable).length,
-    totalChunks: chunks.length,
-    categories: reviews.length > 0
-      ? reviews[0].categories.map(cat => ({
-          id: cat.id, weight: cat.weight,
-          avgScore: Math.round(reviews.reduce((s, r) => s + (r.categories.find(c => c.id === cat.id)?.score ?? 0), 0) / reviews.length * 10) / 10,
-        }))
-      : [],
-    totalDeductions: reviews.flatMap(r => r.categories.flatMap(c => c.deductions)).length,
-    topIssues: reviews.flatMap(r => r.categories.flatMap(c => c.deductions)).slice(0, 10),
-  };
+  // Resolve admin-only telemetry. Already kicked off; this just awaits.
+  let adminTelemetry: { reviewerScore: number; perChunk: Array<{ index: number; score: number; certifiable: boolean }> } | undefined;
+  if (ENABLE_REVIEWER_TELEMETRY && reviewerTelemetry.length > 0) {
+    const settled = await Promise.all(reviewerTelemetry);
+    const valid = settled.filter(s => s.score >= 0);
+    adminTelemetry = {
+      reviewerScore: valid.length > 0 ? Math.round(valid.reduce((s, r) => s + r.score, 0) / valid.length) : 0,
+      perChunk: settled.sort((a, b) => a.index - b.index),
+    };
+  }
 
-  // Save to translations collection
+  // Persist translation. Reviewer telemetry, when present, is on the doc —
+  // the user-facing response and the user-polled job document do NOT carry it.
   let translationId = '';
   try {
     const docRef = await adminDb.collection('translations').add({
@@ -544,9 +537,11 @@ export async function runPipeline(
       chapterTitle: chapterTitle || null, bookId: bookId || null, bookTitle: bookTitle || null,
       chapterIndex: chapterIndex ?? null, totalChapters: totalChapters ?? null,
       inputWordCount: input.wordCount, outputWordCount: finalWords,
-      avgScore: Math.round(avgScore), output: finalText,
+      output: finalText,
       inputPreview: text.slice(0, 300),
       chunkData: chunkDataForStorage.sort((a, b) => a.index - b.index),
+      flagsCount: totalFlags,
+      adminTelemetry: adminTelemetry ?? null,
       createdAt: new Date().toISOString(),
     });
     translationId = docRef.id;
@@ -554,7 +549,7 @@ export async function runPipeline(
     console.error('Firestore save error:', err);
   }
 
-  // Report completion
+  // Report completion. Result carries flags + final text only — no scores.
   await reportProgress({
     status: 'completed',
     completedAt: new Date().toISOString(),
@@ -564,10 +559,11 @@ export async function runPipeline(
       chunks: chunkProgressArr,
     },
     result: {
-      output: finalText, wordCount: finalWords, avgScore: Math.round(avgScore),
+      output: finalText,
+      wordCount: finalWords,
       totalFixes: enforced.totalFixes,
       corrections: enforced.corrections.map(c => ({ from: c.from, to: c.to, rule: c.rule, count: c.count })),
-      reviewerSummary,
+      flagsCount: totalFlags,
       translationId,
     },
   });

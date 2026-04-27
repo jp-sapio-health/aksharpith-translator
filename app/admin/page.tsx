@@ -18,15 +18,19 @@ interface StageInfo {
   completed?: number;
   total?: number;
   chunkCount?: number;
-  avgScore?: number;
-  flaggedChunks?: number;
+  avgScore?: number;          // reviewer telemetry, admin only
+  flaggedChunks?: number;     // legacy smoother flag, admin only
   totalFixes?: number;
 }
 
 interface ChunkProgress {
   index: number;
+  /** Translator self-flags (PR 4 contract, surfaced in admin chunk grid) */
+  flags?: string[];
+  /** Reviewer telemetry — admin only, populated when ENABLE_REVIEWER_TELEMETRY=true */
   score?: number;
   certifiable?: boolean;
+  /** Legacy smoother fallback flag */
   flagged?: boolean;
 }
 
@@ -54,7 +58,12 @@ interface JobDoc {
     chunks?: ChunkProgress[];
     commentary?: string;
   };
-  result?: { avgScore?: number; output?: string } | null;
+  result?: {
+    output?: string;
+    flagsCount?: number;
+    /** Admin-only reviewer telemetry; populated only when telemetry is enabled */
+    avgScore?: number;
+  } | null;
 }
 
 // ── Page guard ──────────────────────────────────────────────────────────────
@@ -251,6 +260,7 @@ function StatusPill({ status, stage }: { status: JobDoc['status']; stage: string
 // ── Job details (expanded) ──────────────────────────────────────────────────
 
 function JobDetails({ job }: { job: JobDoc }) {
+  // Admin sees the full pipeline including the (optional) reviewer telemetry stage.
   const stages = ['chunker', 'translator', 'reviewer', 'smoother', 'assembler', 'enforcer'] as const;
 
   return (
@@ -295,24 +305,37 @@ function JobDetails({ job }: { job: JobDoc }) {
 
       {(job.progress?.chunks ?? []).length > 0 && (
         <div>
-          <div className="text-muted-foreground mb-1.5">Chunks</div>
-          <div className="grid grid-cols-[repeat(auto-fill,minmax(36px,1fr))] gap-1">
+          <div className="text-muted-foreground mb-1.5">
+            Chunks
+            <span className="ml-2 text-muted-foreground/70">
+              (cell shows flag count; colour = reviewer score when telemetry on)
+            </span>
+          </div>
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(40px,1fr))] gap-1">
             {job.progress!.chunks!.map((c) => {
+              const flagCount = (c.flags ?? []).length;
               const score = c.score ?? 0;
-              const tone =
-                c.flagged ? 'bg-destructive/15 text-destructive' :
-                c.certifiable ? 'bg-[oklch(0.85_0.04_145)] text-[oklch(0.32_0.07_145)]' :
-                score >= 96 ? 'bg-[oklch(0.85_0.04_145)] text-[oklch(0.32_0.07_145)]' :
-                score >= 80 ? 'bg-[oklch(0.88_0.04_75)] text-[oklch(0.35_0.08_75)]' :
-                score > 0 ? 'bg-destructive/15 text-destructive' :
-                'bg-paper-warm text-muted-foreground';
+              // Reviewer telemetry → score-based tone.
+              // No telemetry → fall back to flag-count tone.
+              const tone = score > 0
+                ? (c.certifiable || score >= 96 ? 'bg-[oklch(0.85_0.04_145)] text-[oklch(0.32_0.07_145)]' :
+                   score >= 80 ? 'bg-[oklch(0.88_0.04_75)] text-[oklch(0.35_0.08_75)]' :
+                   'bg-destructive/15 text-destructive')
+                : flagCount === 0 ? 'bg-paper-warm text-muted-foreground' :
+                  flagCount <= 2 ? 'bg-[oklch(0.88_0.04_75)] text-[oklch(0.35_0.08_75)]' :
+                  'bg-destructive/15 text-destructive';
+              const tip = `#${c.index + 1}` +
+                (score > 0 ? ` · score ${score}` : '') +
+                ` · ${flagCount} flag${flagCount === 1 ? '' : 's'}` +
+                (c.certifiable ? ' · cert' : '') +
+                (c.flagged ? ' · smoother fallback' : '');
               return (
                 <div
                   key={c.index}
-                  title={`#${c.index + 1} score ${score}${c.certifiable ? ' (cert)' : ''}${c.flagged ? ' (flagged)' : ''}`}
+                  title={tip}
                   className={cn('aspect-square rounded text-[10px] font-mono flex items-center justify-center tabular-nums', tone)}
                 >
-                  {score || ''}
+                  {score > 0 ? score : flagCount > 0 ? `${flagCount}f` : ''}
                 </div>
               );
             })}
@@ -321,8 +344,13 @@ function JobDetails({ job }: { job: JobDoc }) {
       )}
 
       {job.result && (
-        <div className="text-muted-foreground">
-          {job.result.avgScore !== undefined && <>Result avg: <span className="font-mono text-foreground">{job.result.avgScore}</span></>}
+        <div className="text-muted-foreground space-x-3">
+          {typeof job.result.flagsCount === 'number' && (
+            <span>Total self-flags: <span className="font-mono text-foreground tabular-nums">{job.result.flagsCount}</span></span>
+          )}
+          {typeof job.result.avgScore === 'number' && (
+            <span>Reviewer avg: <span className="font-mono text-foreground tabular-nums">{job.result.avgScore}</span></span>
+          )}
         </div>
       )}
     </div>

@@ -64,25 +64,24 @@ const db = getFirestore();
 
 const SONNET = 'claude-sonnet-4-20250514';
 const BATCH = 5;
-const RECHECK_THRESHOLD = 96;
-const MAX_REVIEW_ROUNDS = 2;
-const API_TIMEOUT_MS = 300_000; // 5 min — generous for large chunks
-const MAX_RETRIES = 2;
 const POLL_INTERVAL = 5_000;
+const SDK_MAX_RETRIES = 2;
+const SDK_RETRY_DELAY_MS = 5_000;
 
-// ── Load rules (import from project) ─────────────────────────────────────────
-// We dynamically import the compiled rules. Since the project is TS, we need
-// to use a bundler or copy the rules. For simplicity, we inline the essential
-// rules loading via a child process that compiles on-the-fly.
+// Optional admin-only telemetry (mirrors lib/pipeline.ts). When 'true', the
+// worker fires off a non-blocking reviewer call per chunk and stores the
+// score under translations/<id>.adminTelemetry. Never reaches the user view.
+const ENABLE_REVIEWER_TELEMETRY = (env.ENABLE_REVIEWER_TELEMETRY ?? process.env.ENABLE_REVIEWER_TELEMETRY) === 'true';
+
+// ── Load rules + prompts via tsx ─────────────────────────────────────────────
+// The translator/smoother system prompts are built from the TypeScript rules
+// module. The reviewer prompt is loaded only when telemetry is enabled.
 
 let rulesModule;
 try {
-  // Try npx tsx to import TypeScript directly
   const { execSync } = await import('node:child_process');
-  // Single-line eval script — JSON.stringify of a multiline template literal
-  // emits literal \n escape sequences that tsx/esbuild treat as JS source escapes
-  // (invalid TS syntax). Keep the script on one line to bypass that.
-  const rulesScript = `import { PROTECTED_TERMS, TERMINOLOGY_RULES, PERSONAL_NAME_RULES, PLACE_NAME_RULES, FORBIDDEN_VOCAB_RULES, HEDGING_RULES, DATE_FORMAT_RULES, DIACRITICS_MAP, buildTranslatorSystem, buildReviewerSystem, buildSmootherSystem } from '${ROOT}/lib/rules/index.ts'; import { rulesEnforcerAgent } from '${ROOT}/lib/pipeline.ts'; console.log(JSON.stringify({ TRANSLATOR_SYSTEM: buildTranslatorSystem(), REVIEWER_SYSTEM: buildReviewerSystem(), SMOOTHER_SYSTEM: buildSmootherSystem(PROTECTED_TERMS) }));`;
+  // Single-line eval to keep tsx/esbuild from interpreting \n as a TS source escape.
+  const rulesScript = `import { buildTranslatorSystem, buildReviewerSystem, buildSmootherSystem } from '${ROOT}/lib/rules/index.ts'; console.log(JSON.stringify({ TRANSLATOR_SYSTEM: buildTranslatorSystem(), SMOOTHER_SYSTEM: buildSmootherSystem(), REVIEWER_SYSTEM: buildReviewerSystem() }));`;
   const result = execSync(`npx tsx -e ${JSON.stringify(rulesScript)}`, {
     encoding: 'utf-8', cwd: ROOT, maxBuffer: 5 * 1024 * 1024,
     env: { ...process.env, ...env },
@@ -91,15 +90,14 @@ try {
 } catch (e) {
   console.error('Failed to load rules via tsx. Falling back to inline prompts.');
   console.error(e.message);
-  // Minimal fallback — won't have full rules but worker can still function
   rulesModule = {
-    TRANSLATOR_SYSTEM: 'You are a professional Gujarati-to-English translator for Swaminarayan religious texts. Translate faithfully, preserving meaning, verse structure, and spiritual terminology.',
-    REVIEWER_SYSTEM: 'You are a translation quality reviewer. Score the translation 0-100 and provide a revised version. Return JSON with: totalScore, revised, certifiable (boolean), categories (array), pitfalls (array), issues (array).',
-    SMOOTHER_SYSTEM: 'You are a light-touch copy-editor. Your goal is MINIMAL intervention — change as few words as possible, fixing only genuinely awkward phrasing. You must preserve at least 90% of the original words unchanged. Do NOT restructure sentences, add transitions, replace words with synonyms, or reorder anything. Do NOT alter meaning, names, or religious terms. If a passage reads fine, leave it EXACTLY as-is. Return ONLY the revised text.',
+    TRANSLATOR_SYSTEM: 'You are a trustee of the parampara. Translate Gujarati to English with fidelity to BAPS Swaminarayan editorial rules. Output ONLY <translation>...</translation><flags>...</flags>.',
+    SMOOTHER_SYSTEM: 'I am working on improving a translation of a non-fiction historical biography for better readability. Keep direct quotes, transliterated verses and proper nouns verbatim. Output ONLY <smoothed>...</smoothed>.',
+    REVIEWER_SYSTEM: 'You are a translation reviewer. Return JSON with totalScore, revised, certifiable.',
   };
 }
 
-const { TRANSLATOR_SYSTEM, REVIEWER_SYSTEM, SMOOTHER_SYSTEM } = rulesModule;
+const { TRANSLATOR_SYSTEM, SMOOTHER_SYSTEM, REVIEWER_SYSTEM } = rulesModule;
 
 // ── Claude Agent SDK ─────────────────────────────────────────────────────────
 // Auth is via CLAUDE_CODE_OAUTH_TOKEN env var (loaded from .env.local at top of
@@ -125,9 +123,6 @@ if (!process.env.CLAUDE_CODE_OAUTH_TOKEN) {
 
 // Isolated cwd keeps the SDK from auto-discovering workspace CLAUDE.md / .claude/.
 const SDK_CWD = mkdtempSync(`${tmpdir()}/aksharpith-sdk-`);
-
-const SDK_MAX_RETRIES = 2;
-const SDK_RETRY_DELAY_MS = 5_000;
 
 async function callClaudeOnce(params) {
   const userPrompt = params.messages.map(m => typeof m.content === 'string' ? m.content : '').join('\n');
@@ -234,18 +229,81 @@ function deterministicChunk(text) {
   return chunks.length > 0 ? chunks : [trimmed];
 }
 
+// ── XML output parsers (mirrors lib/parser.ts) ───────────────────────────────
+
+function stripFences(raw) {
+  let s = raw.trim();
+  const m = s.match(/^```(?:[a-zA-Z]+)?\s*\n([\s\S]*?)\n\s*```\s*$/);
+  if (m) s = m[1].trim();
+  return s;
+}
+
+function extractSingleTag(source, tag, stage) {
+  const open = `<${tag}>`;
+  const close = `</${tag}>`;
+  const firstOpen = source.indexOf(open);
+  if (firstOpen === -1) throw new Error(`[${stage}] Missing <${tag}> opening tag`);
+  const lastOpen = source.lastIndexOf(open);
+  if (lastOpen !== firstOpen) throw new Error(`[${stage}] Multiple <${tag}> opening tags`);
+  const closeIdx = source.indexOf(close, firstOpen + open.length);
+  if (closeIdx === -1) throw new Error(`[${stage}] Missing </${tag}> closing tag`);
+  const lastClose = source.lastIndexOf(close);
+  if (lastClose !== closeIdx) throw new Error(`[${stage}] Multiple </${tag}> closing tags`);
+  return source.slice(firstOpen + open.length, closeIdx).trim();
+}
+
+function parseTranslatorXml(raw) {
+  if (typeof raw !== 'string') throw new Error('[translator] Empty or non-string output');
+  const cleaned = stripFences(raw);
+  if (!cleaned) throw new Error('[translator] Empty output');
+  const translation = extractSingleTag(cleaned, 'translation', 'translator');
+  if (!translation) throw new Error('[translator] Empty <translation> block');
+  const flagsBlock = extractSingleTag(cleaned, 'flags', 'translator');
+  const flags = [];
+  const re = /<flag>([\s\S]*?)<\/flag>/g;
+  let m;
+  while ((m = re.exec(flagsBlock)) !== null) {
+    const t = m[1].trim();
+    if (t) flags.push(t);
+  }
+  return { translation, flags };
+}
+
+function parseSmootherXml(raw) {
+  if (typeof raw !== 'string') throw new Error('[smoother] Empty or non-string output');
+  const cleaned = stripFences(raw);
+  if (!cleaned) throw new Error('[smoother] Empty output');
+  const smoothed = extractSingleTag(cleaned, 'smoothed', 'smoother');
+  if (!smoothed) throw new Error('[smoother] Empty <smoothed> block');
+  return { smoothed };
+}
+
 // ── Agent functions ──────────────────────────────────────────────────────────
 
 async function translatorAgent(chunk, chunkIndex, totalChunks) {
-  return callClaude({
+  const raw = await callClaude({
     model: SONNET, max_tokens: 8192,
     system: TRANSLATOR_SYSTEM,
-    messages: [{ role: 'user', content: `Chunk ${chunkIndex + 1} of ${totalChunks}. Translate the following Gujarati text to English. For any verse or poetry, you MUST include the Roman transliteration in curly quotes first, then the English meaning in parentheses — both are mandatory. Provide ONLY the translated output (no preamble or notes).\n\nGUJARATI:\n${chunk}` }],
+    messages: [{ role: 'user', content: `Chunk ${chunkIndex + 1} of ${totalChunks}. Translate the following Gujarati text into English following the rules above. For verse or poetic lines, include the Roman transliteration in curly quotes first, then the English meaning in parentheses — both mandatory. Output ONLY the two XML blocks specified in the system prompt: <translation>…</translation><flags>…</flags>.\n\nGUJARATI:\n${chunk}` }],
   });
+  return parseTranslatorXml(raw);
 }
 
+async function smootherAgent(text) {
+  const raw = await callClaude({
+    model: SONNET, max_tokens: 8192,
+    system: SMOOTHER_SYSTEM,
+    messages: [{ role: 'user', content: `Smooth the following passage per the rules above. Output ONLY <smoothed>…</smoothed>.\n\n${text}` }],
+  });
+  return parseSmootherXml(raw);
+}
+
+/**
+ * @deprecated Admin-only telemetry. Off by default. Tolerant JSON parser
+ * because the reviewer's score is best-effort and never blocks the user path.
+ */
 async function reviewerAgent(original, translation) {
-  const fallback = { categories: [], pitfalls: [], issues: [], score: 50, revised: translation, certifiable: false };
+  const fallback = { score: -1, certifiable: false };
   let raw;
   try {
     raw = await callClaude({
@@ -254,75 +312,26 @@ async function reviewerAgent(original, translation) {
       messages: [{ role: 'user', content: `GUJARATI SOURCE:\n${original}\n\nTRANSLATION TO AUDIT:\n${translation}` }],
     });
   } catch (err) {
-    console.error('  Reviewer API call failed:', err.message);
+    console.error('  [telemetry] Reviewer API call failed:', err.message);
     return fallback;
   }
-
   const stripped = raw.replace(/^```(?:json)?\s*/gm, '').replace(/\s*```$/gm, '');
   const match = stripped.match(/\{[\s\S]*\}/);
-  if (!match) { console.error('  Reviewer returned no JSON'); return fallback; }
-
+  if (!match) return fallback;
   const jsonStr = match[0];
   try {
     const p = JSON.parse(jsonStr);
-    const rawScore = typeof p.totalScore === 'number' ? p.totalScore : (typeof p.score === 'number' ? p.score : 50);
-    const cats = Array.isArray(p.categories)
-      ? p.categories.map(c => ({
-          id: typeof c.id === 'string' ? c.id : '',
-          weight: typeof c.weight === 'number' ? c.weight : 0,
-          score: typeof c.score === 'number' ? Math.max(0, c.score) : 0,
-          deductions: Array.isArray(c.deductions) ? c.deductions.filter(s => typeof s === 'string') : (Array.isArray(c.issues) ? c.issues.filter(s => typeof s === 'string') : []),
-          pass: typeof c.pass === 'boolean' ? c.pass : true,
-        }))
-      : [];
+    const rawScore = typeof p.totalScore === 'number' ? p.totalScore : (typeof p.score === 'number' ? p.score : -1);
     return {
-      categories: cats,
-      pitfalls: Array.isArray(p.pitfalls) ? p.pitfalls.filter(s => typeof s === 'string') : [],
-      issues: Array.isArray(p.issues) ? p.issues.filter(s => typeof s === 'string') : [],
-      score: Math.max(0, Math.min(100, rawScore)),
-      revised: typeof p.revised === 'string' && p.revised.trim() ? p.revised.trim() : translation,
+      score: Math.max(-1, Math.min(100, rawScore)),
       certifiable: typeof p.certifiable === 'boolean' ? p.certifiable : false,
     };
   } catch {
-    console.error('  Reviewer JSON parse failed, using regex fallback');
-    let score = 50;
+    let score = -1;
     const tsm = jsonStr.match(/"totalScore"\s*:\s*(\d+)/);
     if (tsm) score = Math.max(0, Math.min(100, parseInt(tsm[1], 10)));
-    else { const sm = jsonStr.match(/"score"\s*:\s*(\d+)/); if (sm) score = Math.max(0, Math.min(100, parseInt(sm[1], 10))); }
-    let revised = translation;
-    const rm = jsonStr.match(/"revised"\s*:\s*"([\s\S]*?)(?:"\s*[,}]|$)/);
-    if (rm && rm[1].trim().length > 50) { try { revised = JSON.parse(`"${rm[1]}"`); } catch { revised = translation; } }
-    let certifiable = false;
-    const cm = jsonStr.match(/"certifiable"\s*:\s*(true|false)/);
-    if (cm) certifiable = cm[1] === 'true';
-    return { categories: [], pitfalls: [], issues: [], score, revised, certifiable };
+    return { score, certifiable: false };
   }
-}
-
-function wordDiffRatio(a, b) {
-  const wordsA = a.split(/\s+/).filter(Boolean);
-  const wordsB = b.split(/\s+/).filter(Boolean);
-  const maxLen = Math.max(wordsA.length, wordsB.length);
-  if (maxLen === 0) return 0;
-  const freq = {};
-  for (const w of wordsA) freq[w] = (freq[w] ?? 0) + 1;
-  for (const w of wordsB) freq[w] = (freq[w] ?? 0) - 1;
-  const changed = Object.values(freq).reduce((s, v) => s + Math.abs(v), 0) / 2;
-  return changed / maxLen;
-}
-
-async function smootherAgent(text) {
-  const smoothed = await callClaude({
-    model: SONNET, max_tokens: 8192,
-    system: SMOOTHER_SYSTEM,
-    messages: [{ role: 'user', content: `Perform the readability pass. Return ONLY the revised text.\n\n${text}` }],
-  });
-  const diffRatio = wordDiffRatio(text, smoothed);
-  if (diffRatio > 0.15) {
-    console.warn(`  Smoother changed ${(diffRatio * 100).toFixed(1)}% of words (>15%). Using original.`);
-    return { text, flagged: true };
-  }
-  return { text: smoothed, flagged: false };
 }
 
 function assemblerAgent(smoothedChunks) {
@@ -429,72 +438,78 @@ async function runJobPipeline(jobId, jobData) {
 
   await reportProgress({ progress: { currentStage: 'translator', stages: { chunker: { status: 'done', chunkCount: chunks.length } }, chunks: chunkProgressArr } });
 
-  // ── Stages 2-4: Pipelined per-chunk
+  // ── Stages 2-3: Pipelined per-chunk (translator → smoother)
   const translations = new Array(chunks.length).fill('');
-  const reviews = new Array(chunks.length);
+  const chunkFlags = Array.from({ length: chunks.length }, () => []);
   const smoothedChunks = new Array(chunks.length).fill('');
+  const reviewerTelemetry = []; // optional admin-only
   const chunkDataForStorage = [];
 
-  let translateDone = 0, reviewDone = 0, smoothDone = 0;
-  let totalRechecks = 0, smootherFlagged = 0;
+  let translateDone = 0, smoothDone = 0;
+
+  function stageSnapshot() {
+    return {
+      chunker: { status: 'done', chunkCount: chunks.length },
+      translator: { status: translateDone >= chunks.length ? 'done' : 'running', completed: translateDone, total: chunks.length },
+      smoother: { status: smoothDone >= chunks.length ? 'done' : (smoothDone > 0 || translateDone > 0 ? 'running' : 'waiting'), completed: smoothDone, total: chunks.length },
+    };
+  }
 
   async function processChunk(i) {
     const chunkLabel = chunks.length === 1 ? '' : ` chunk ${i + 1}/${chunks.length}`;
     const srcWords = chunks[i].split(/\s+/).filter(Boolean).length;
 
-    // Translate
-    await reportProgress({ progress: { currentStage: 'translator', commentary: `Translating${chunkLabel} (${srcWords} words) with full Aksharpith style context…`, chunks: chunkProgressArr } });
+    // Translate (XML output: <translation> + <flags>)
+    await reportProgress({ progress: { currentStage: 'translator', commentary: `Translating${chunkLabel} (${srcWords} words) with full Aksharpith style context…`, stages: stageSnapshot(), chunks: chunkProgressArr } });
     console.log(`  [chunk ${i + 1}/${chunks.length}] Translating...`);
-    translations[i] = rulesEnforcerAgent(await translatorAgent(chunks[i], i, chunks.length)).text;
+    const translatorOut = await translatorAgent(chunks[i], i, chunks.length);
+    translations[i] = rulesEnforcerAgent(translatorOut.translation).text;
+    chunkFlags[i] = translatorOut.flags;
     translateDone++;
-    chunkProgressArr[i] = { ...chunkProgressArr[i], translation: translations[i].slice(0, 300) };
-    await reportProgress({ progress: { currentStage: 'translator', commentary: `Translated${chunkLabel} — ${translations[i].split(/\s+/).filter(Boolean).length} words output`, chunks: chunkProgressArr } });
-
-    // Review
-    await reportProgress({ progress: { currentStage: 'reviewer', commentary: `Scoring${chunkLabel} against 6-category weighted rubric…`, chunks: chunkProgressArr } });
-    console.log(`  [chunk ${i + 1}/${chunks.length}] Reviewing...`);
-    reviews[i] = await reviewerAgent(chunks[i], translations[i]);
-    const chunkScoreHistory = [reviews[i].score];
-    let chunkReviewRound = 1;
-    for (let round = 1; round <= MAX_REVIEW_ROUNDS && reviews[i].score < RECHECK_THRESHOLD; round++) {
-      totalRechecks++;
-      chunkReviewRound++;
-      await reportProgress({ progress: { currentStage: 'reviewer', commentary: `Re-reviewing${chunkLabel} — score ${reviews[i].score}% below ${RECHECK_THRESHOLD}% threshold, round ${chunkReviewRound}…`, chunks: chunkProgressArr } });
-      console.log(`  [chunk ${i + 1}/${chunks.length}] Re-review round ${chunkReviewRound} (score: ${reviews[i].score})...`);
-      reviews[i] = await reviewerAgent(chunks[i], reviews[i].revised);
-      chunkScoreHistory.push(reviews[i].score);
-    }
-    reviewDone++;
-
     chunkProgressArr[i] = {
       ...chunkProgressArr[i],
-      score: reviews[i].score,
-      certifiable: reviews[i].certifiable,
-      categories: reviews[i].categories,
-      pitfalls: reviews[i].pitfalls,
-      issues: reviews[i].issues,
-      scoreHistory: chunkScoreHistory,
-      reviewRound: chunkReviewRound,
+      translation: translations[i].slice(0, 300),
+      flags: translatorOut.flags,
     };
-    await reportProgress({ progress: { currentStage: 'reviewer', commentary: `Reviewed${chunkLabel} — score ${reviews[i].score}%${reviews[i].certifiable ? ' (certified)' : ''}`, chunks: chunkProgressArr } });
+    const flagSummary = translatorOut.flags.length === 0
+      ? 'no self-flags'
+      : `${translatorOut.flags.length} self-flag${translatorOut.flags.length === 1 ? '' : 's'}`;
+    await reportProgress({ progress: { currentStage: 'translator', commentary: `Translated${chunkLabel} — ${translations[i].split(/\s+/).filter(Boolean).length} words output, ${flagSummary}`, stages: stageSnapshot(), chunks: chunkProgressArr } });
+
+    // Optional admin-only telemetry — fire-and-forget.
+    if (ENABLE_REVIEWER_TELEMETRY) {
+      reviewerTelemetry.push(
+        reviewerAgent(chunks[i], translations[i])
+          .then(r => ({ index: i, score: r.score, certifiable: r.certifiable }))
+          .catch(err => {
+            console.error(`  [telemetry] reviewer failed on chunk ${i}: ${err.message}`);
+            return { index: i, score: -1, certifiable: false };
+          }),
+      );
+    }
+
+    // Smoother (XML output). Fall back to translator output on parser/model failure.
+    await reportProgress({ progress: { currentStage: 'smoother', commentary: `Smoothing${chunkLabel} — preserving direct quotes, transliterated verses and proper nouns…`, stages: stageSnapshot(), chunks: chunkProgressArr } });
+    console.log(`  [chunk ${i + 1}/${chunks.length}] Smoothing...`);
+    let smoothedText = translations[i];
+    let smootherFallback = false;
+    try {
+      const smoothed = await smootherAgent(translations[i]);
+      smoothedText = smoothed.smoothed;
+    } catch (err) {
+      smootherFallback = true;
+      console.warn(`  [chunk ${i + 1}/${chunks.length}] Smoother fallback: ${err.message}`);
+    }
+    smoothedChunks[i] = rulesEnforcerAgent(smoothedText).text;
+    smoothDone++;
+    await reportProgress({ progress: { currentStage: 'smoother', commentary: `Smoothed${chunkLabel}${smootherFallback ? ' (fell back to translator output)' : ''}`, stages: stageSnapshot(), chunks: chunkProgressArr } });
 
     chunkDataForStorage.push({
-      index: i, originalGujarati: chunks[i], translation: reviews[i].revised,
-      reviewerScore: reviews[i].score,
-      reviewerCategories: reviews[i].categories.map(c => ({ id: c.id, score: c.score, weight: c.weight })),
-      certifiable: reviews[i].certifiable,
+      index: i,
+      originalGujarati: chunks[i],
+      translation: smoothedChunks[i],
+      flags: translatorOut.flags,
     });
-
-    // Smooth
-    await reportProgress({ progress: { currentStage: 'smoother', commentary: `Readability pass on${chunkLabel} — preserving terminology and direct quotes…`, chunks: chunkProgressArr } });
-    console.log(`  [chunk ${i + 1}/${chunks.length}] Smoothing...`);
-    const smoothResult = await smootherAgent(reviews[i].revised);
-    const chunkEnforced = rulesEnforcerAgent(smoothResult.text);
-    smoothedChunks[i] = chunkEnforced.text;
-    if (smoothResult.flagged) smootherFlagged++;
-    smoothDone++;
-    chunkProgressArr[i] = { ...chunkProgressArr[i], flagged: smoothResult.flagged };
-    await reportProgress({ progress: { currentStage: 'smoother', commentary: `Smoothed${chunkLabel}${smoothResult.flagged ? ' (flagged — using original)' : ''}`, chunks: chunkProgressArr } });
   }
 
   // Process in batches
@@ -505,48 +520,39 @@ async function runJobPipeline(jobId, jobData) {
     const firstFailure = results.find(r => r.status === 'rejected');
     if (firstFailure && firstFailure.status === 'rejected') throw firstFailure.reason;
 
-    const currentStage = smoothDone === chunks.length ? 'assembler' : reviewDone > translateDone ? 'smoother' : translateDone > 0 ? 'reviewer' : 'translator';
+    const currentStage = smoothDone === chunks.length
+      ? 'assembler'
+      : translateDone > 0 ? 'smoother' : 'translator';
     await reportProgress({
-      progress: {
-        currentStage,
-        stages: {
-          chunker: { status: 'done', chunkCount: chunks.length },
-          translator: { status: translateDone >= chunks.length ? 'done' : 'running', completed: translateDone, total: chunks.length },
-          reviewer: { status: reviewDone >= chunks.length ? 'done' : 'running', completed: reviewDone, total: chunks.length, rechecked: totalRechecks, certCount: reviews.filter(r => r?.certifiable).length, avgScore: reviewDone > 0 ? Math.round(reviews.filter(Boolean).reduce((s, r) => s + r.score, 0) / reviewDone) : 0 },
-          smoother: { status: smoothDone >= chunks.length ? 'done' : 'running', completed: smoothDone, total: chunks.length, flaggedChunks: smootherFlagged },
-        },
-        chunks: chunkProgressArr,
-      },
+      progress: { currentStage, stages: stageSnapshot(), chunks: chunkProgressArr },
     });
   }
 
-  // ── Stage 5: Assembler
-  await reportProgress({ progress: { currentStage: 'assembler', stages: { assembler: { status: 'running' } }, chunks: chunkProgressArr } });
+  // ── Stage 4: Assembler (deterministic)
+  await reportProgress({ progress: { currentStage: 'assembler', commentary: `Joining ${chunks.length} chunks into a single document — deduplicating boundary overlaps…`, stages: { assembler: { status: 'running' } }, chunks: chunkProgressArr } });
   const assembled = assemblerAgent(smoothedChunks);
-  await reportProgress({ progress: { currentStage: 'enforcer', stages: { assembler: { status: 'done' } }, chunks: chunkProgressArr } });
+  await reportProgress({ progress: { currentStage: 'enforcer', commentary: 'Document assembled successfully', stages: { assembler: { status: 'done' } }, chunks: chunkProgressArr } });
 
-  // ── Stage 6: Rules Enforcer
-  await reportProgress({ progress: { currentStage: 'enforcer', stages: { enforcer: { status: 'running' } }, chunks: chunkProgressArr } });
+  // ── Stage 5: Rules Enforcer (deterministic)
+  await reportProgress({ progress: { currentStage: 'enforcer', commentary: 'Running deterministic rules — terminology, punctuation, diacritics, place names…', stages: { enforcer: { status: 'running' } }, chunks: chunkProgressArr } });
   const enforced = rulesEnforcerAgent(assembled);
   const finalText = enforced.text;
   const finalWords = finalText.trim().split(/\s+/).filter(Boolean).length;
-  const avgScore = chunks.length > 0 ? reviews.reduce((s, r) => s + r.score, 0) / chunks.length : 0;
+  const totalFlags = chunkFlags.reduce((s, f) => s + f.length, 0);
 
-  const reviewerSummary = {
-    avgScore: Math.round(avgScore),
-    certifiedCount: reviews.filter(r => r.certifiable).length,
-    totalChunks: chunks.length,
-    categories: reviews.length > 0
-      ? reviews[0].categories.map(cat => ({
-          id: cat.id, weight: cat.weight,
-          avgScore: Math.round(reviews.reduce((s, r) => s + (r.categories.find(c => c.id === cat.id)?.score ?? 0), 0) / reviews.length * 10) / 10,
-        }))
-      : [],
-    totalDeductions: reviews.flatMap(r => r.categories.flatMap(c => c.deductions)).length,
-    topIssues: reviews.flatMap(r => r.categories.flatMap(c => c.deductions)).slice(0, 10),
-  };
+  // Resolve admin-only telemetry (already kicked off; this just awaits).
+  let adminTelemetry;
+  if (ENABLE_REVIEWER_TELEMETRY && reviewerTelemetry.length > 0) {
+    const settled = await Promise.all(reviewerTelemetry);
+    const valid = settled.filter(s => s.score >= 0);
+    adminTelemetry = {
+      reviewerScore: valid.length > 0 ? Math.round(valid.reduce((s, r) => s + r.score, 0) / valid.length) : 0,
+      perChunk: settled.sort((a, b) => a.index - b.index),
+    };
+  }
 
-  // Save to translations collection
+  // Save translation document. Reviewer telemetry stored on the doc; user-facing
+  // payload (below) does not include reviewer-derived fields.
   let translationId = '';
   try {
     const docRef = await db.collection('translations').add({
@@ -554,9 +560,11 @@ async function runJobPipeline(jobId, jobData) {
       chapterTitle: chapterTitle || null, bookId: bookId || null, bookTitle: bookTitle || null,
       chapterIndex: chapterIndex ?? null, totalChapters: totalChapters ?? null,
       inputWordCount: input.wordCount, outputWordCount: finalWords,
-      avgScore: Math.round(avgScore), output: finalText,
+      output: finalText,
       inputPreview: text.slice(0, 300),
       chunkData: chunkDataForStorage.sort((a, b) => a.index - b.index),
+      flagsCount: totalFlags,
+      adminTelemetry: adminTelemetry ?? null,
       createdAt: new Date().toISOString(),
     });
     translationId = docRef.id;
@@ -564,7 +572,7 @@ async function runJobPipeline(jobId, jobData) {
     console.error('  Firestore save error:', err.message);
   }
 
-  // Report completion
+  // Report completion. User-facing payload carries flags + final text only.
   await reportProgress({
     status: 'completed',
     completedAt: new Date().toISOString(),
@@ -574,10 +582,11 @@ async function runJobPipeline(jobId, jobData) {
       chunks: chunkProgressArr,
     },
     result: {
-      output: finalText, wordCount: finalWords, avgScore: Math.round(avgScore),
+      output: finalText,
+      wordCount: finalWords,
       totalFixes: enforced.totalFixes,
       corrections: enforced.corrections.map(c => ({ from: c.from, to: c.to, rule: c.rule, count: c.count })),
-      reviewerSummary,
+      flagsCount: totalFlags,
       translationId,
     },
   });

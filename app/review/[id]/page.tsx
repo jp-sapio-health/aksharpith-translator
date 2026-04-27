@@ -3,11 +3,16 @@
 import { useState, useEffect, useRef, use, Suspense } from 'react';
 import { useAuth } from '../../../lib/auth-context';
 import { useRouter, useSearchParams } from 'next/navigation';
+import { Button } from '../../../components/ui/button';
+import { cn } from '../../../lib/utils';
 
 interface ChunkData {
   index: number;
   originalGujarati: string;
   translation: string;
+  /** Translator self-flags — surfaced in user view (PR 4 contract). */
+  flags?: string[];
+  /** Reviewer telemetry — admin only when present, not displayed in user view. */
   reviewerScore?: number;
   certifiable?: boolean;
   reviewerCategories?: Array<{ id: string; score: number; weight: number }>;
@@ -22,11 +27,11 @@ interface TranslationDoc {
   totalChapters: number | null;
   inputWordCount: number;
   outputWordCount: number;
-  avgScore: number;
   output: string;
   inputPreview: string;
   email: string;
   createdAt: string;
+  flagsCount?: number;
   chunkData?: ChunkData[];
 }
 
@@ -36,18 +41,15 @@ function formatDate(iso: string) {
          d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
 }
 
-function ScoreBadge({ score }: { score: number }) {
-  const tier = score >= 90 ? { label: 'Publication Ready', bg: 'var(--green-bg)', color: 'var(--green)', border: 'var(--green-border)' }
-    : score >= 80 ? { label: 'Strong', bg: 'var(--green-bg)', color: 'var(--green)', border: 'var(--green-border)' }
-    : score >= 70 ? { label: 'Revised', bg: 'var(--amber-bg)', color: 'var(--amber)', border: 'var(--amber-border)' }
-    : { label: 'Needs Work', bg: 'var(--amber-bg)', color: 'var(--amber)', border: 'var(--amber-border)' };
+/** Self-flag pill: 0 = green, 1–2 = amber, 3+ = orange. */
+function FlagPill({ count }: { count: number }) {
+  const tone =
+    count === 0 ? 'bg-[oklch(0.94_0.04_145)] text-[oklch(0.40_0.10_145)] border-[oklch(0.85_0.04_145)]' :
+    count <= 2 ? 'bg-[oklch(0.95_0.04_75)] text-[oklch(0.40_0.11_75)] border-[oklch(0.86_0.04_75)]' :
+    'bg-[oklch(0.95_0.04_45)] text-[oklch(0.42_0.13_45)] border-[oklch(0.85_0.05_45)]';
   return (
-    <span style={{
-      fontSize: 10, fontWeight: 600, letterSpacing: '0.8px', textTransform: 'uppercase',
-      padding: '3px 10px', borderRadius: 3,
-      background: tier.bg, color: tier.color, border: `1px solid ${tier.border}`,
-    }}>
-      {score}% · {tier.label}
+    <span className={cn('inline-flex items-center gap-1 rounded border px-2 py-0.5 text-[10px] font-mono uppercase tracking-wider', tone)}>
+      {count === 0 ? 'no flags' : `${count} flag${count === 1 ? '' : 's'}`}
     </span>
   );
 }
@@ -57,24 +59,28 @@ function ChunkReviewDesktop({ chunk }: { chunk: ChunkData }) {
   const translationParas = chunk.translation.split(/\n\s*\n/).map(p => p.trim()).filter(Boolean);
 
   return (
-    <div style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius, 8px)', overflow: 'hidden' }}>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', borderBottom: '1px solid var(--border)' }}>
-        <div style={{ padding: '8px 16px', borderRight: '1px solid var(--border)', background: 'var(--bg-warm)', fontSize: 10, fontWeight: 600, letterSpacing: 2, textTransform: 'uppercase', color: 'var(--text-light)' }}>
+    <div className="rounded-md border overflow-hidden">
+      <div className="grid grid-cols-2 border-b bg-paper-warm/40">
+        <div className="px-4 py-2 border-r font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
           Gujarati Source
         </div>
-        <div style={{ padding: '8px 16px', fontSize: 10, fontWeight: 600, letterSpacing: 2, textTransform: 'uppercase', color: 'var(--text-light)' }}>
+        <div className="px-4 py-2 font-mono text-[10px] uppercase tracking-widest text-muted-foreground">
           English Translation
         </div>
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', maxHeight: 600 }}>
-        <div style={{ borderRight: '1px solid var(--border)', background: 'var(--bg-warm)', overflowY: 'auto', padding: 16, paddingBottom: 400, maxHeight: 600 }}>
+      <div className="grid grid-cols-2 max-h-[600px]">
+        <div className="overflow-y-auto p-4 pb-[400px] bg-paper-warm/30 border-r">
           {sourceParas.map((p, i) => (
-            <p key={i} style={{ fontSize: 15, lineHeight: 2.1, color: 'var(--text)', margin: 0, marginBottom: i < sourceParas.length - 1 ? 20 : 0 }}>{p}</p>
+            <p key={i} className={cn('text-[15px] leading-[2.1] text-foreground m-0', i < sourceParas.length - 1 && 'mb-5')}>
+              {p}
+            </p>
           ))}
         </div>
-        <div style={{ overflowY: 'auto', padding: 16, paddingBottom: 400, maxHeight: 600 }}>
+        <div className="overflow-y-auto p-4 pb-[400px]">
           {translationParas.map((p, i) => (
-            <p key={i} style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 16, lineHeight: 1.9, color: 'var(--text)', margin: 0, marginBottom: i < translationParas.length - 1 ? 16 : 0 }}>{p}</p>
+            <p key={i} className={cn('font-serif text-[16px] leading-[1.9] text-foreground m-0', i < translationParas.length - 1 && 'mb-4')}>
+              {p}
+            </p>
           ))}
         </div>
       </div>
@@ -88,13 +94,11 @@ function ChunkReviewMobile({ chunk, showSource, onToggle }: { chunk: ChunkData; 
   const scrollRef = useRef<{ source: number; translation: number }>({ source: 0, translation: 0 });
 
   const handleToggle = () => {
-    // Save current scroll position for the active view
     scrollRef.current[showSource ? 'source' : 'translation'] = window.scrollY;
     onToggle();
   };
 
   useEffect(() => {
-    // Restore scroll position for the view we just switched to
     window.scrollTo(0, scrollRef.current[showSource ? 'source' : 'translation']);
   }, [showSource]);
 
@@ -102,37 +106,30 @@ function ChunkReviewMobile({ chunk, showSource, onToggle }: { chunk: ChunkData; 
 
   return (
     <>
-      <div style={{
-        background: showSource ? 'var(--bg-warm)' : 'var(--bg-white)',
-        padding: 16, paddingBottom: 100, minHeight: '60vh',
-      }}>
-        <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: 2, textTransform: 'uppercase', color: 'var(--text-light)', marginBottom: 12 }}>
+      <div className={cn('p-4 pb-24 min-h-[60vh]', showSource ? 'bg-paper-warm/40' : 'bg-paper')}>
+        <div className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground mb-3">
           {showSource ? 'Gujarati Source' : 'English Translation'}
         </div>
         {paras.map((p, i) => (
-          <p key={i} style={{
-            fontSize: showSource ? 15 : 16,
-            fontFamily: showSource ? 'inherit' : '"Cormorant Garamond", serif',
-            lineHeight: showSource ? 2.1 : 1.9,
-            color: 'var(--text)', margin: 0,
-            marginBottom: i < paras.length - 1 ? (showSource ? 20 : 16) : 0,
-          }}>{p}</p>
+          <p
+            key={i}
+            className={cn(
+              'text-foreground m-0',
+              showSource ? 'text-[15px] leading-[2.1]' : 'font-serif text-[16px] leading-[1.9]',
+              i < paras.length - 1 && (showSource ? 'mb-5' : 'mb-4'),
+            )}
+          >
+            {p}
+          </p>
         ))}
       </div>
 
-      {/* Floating toggle */}
+      {/* Floating toggle — ≥48px touch target */}
       <button
+        type="button"
         onClick={handleToggle}
-        style={{
-          position: 'fixed', bottom: 24, right: 24, zIndex: 50,
-          width: 48, height: 48, borderRadius: '50%',
-          background: 'var(--text)', color: 'var(--bg-white)',
-          border: 'none', cursor: 'pointer',
-          boxShadow: '0 2px 12px rgba(0,0,0,0.2)',
-          fontFamily: "'Karla', sans-serif", fontSize: 10, fontWeight: 700,
-          letterSpacing: '0.5px', textTransform: 'uppercase',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}
+        aria-label={showSource ? 'Show English' : 'Show Gujarati'}
+        className="fixed bottom-6 right-6 z-50 h-12 w-12 rounded-full bg-foreground text-background shadow-lg font-mono text-[11px] font-bold tracking-wider flex items-center justify-center"
       >
         {showSource ? 'EN' : 'GU'}
       </button>
@@ -151,18 +148,11 @@ function useIsMobile() {
   return isMobile;
 }
 
-function ChunkReview({ chunk, isMobile, showSource, onToggleSource }: { chunk: ChunkData; isMobile: boolean; showSource: boolean; onToggleSource: () => void }) {
-  if (isMobile) {
-    return <ChunkReviewMobile chunk={chunk} showSource={showSource} onToggle={onToggleSource} />;
-  }
-  return <ChunkReviewDesktop chunk={chunk} />;
-}
-
 export default function ReviewPage({ params }: { params: Promise<{ id: string }> }) {
   return (
     <Suspense fallback={
-      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg)' }}>
-        <div style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 20, color: 'var(--text-muted)', fontStyle: 'italic' }}>Loading…</div>
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="font-serif italic text-xl text-muted-foreground">Loading…</div>
       </div>
     }>
       <ReviewPageInner params={params} />
@@ -179,7 +169,6 @@ function ReviewPageInner({ params }: { params: Promise<{ id: string }> }) {
   const [fetching, setFetching] = useState(true);
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
-  const [showInfo, setShowInfo] = useState(false);
   const [shareCopied, setShareCopied] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [showSource, setShowSource] = useState(true);
@@ -198,7 +187,10 @@ function ReviewPageInner({ params }: { params: Promise<{ id: string }> }) {
       if (!token) return;
       try {
         const res = await fetch(`/api/translations/${id}`, { headers: { 'Authorization': `Bearer ${token}` } });
-        if (!res.ok) { setError(res.status === 404 ? 'Translation not found' : `Error ${res.status}`); return; }
+        if (!res.ok) {
+          setError(res.status === 404 ? 'Translation not found' : `Error ${res.status}`);
+          return;
+        }
         setDoc(await res.json());
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Failed to load');
@@ -210,8 +202,8 @@ function ReviewPageInner({ params }: { params: Promise<{ id: string }> }) {
 
   if (loading || !user) {
     return (
-      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg)' }}>
-        <div style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 20, color: 'var(--text-muted)', fontStyle: 'italic' }}>Loading…</div>
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="font-serif italic text-xl text-muted-foreground">Loading…</div>
       </div>
     );
   }
@@ -221,179 +213,166 @@ function ReviewPageInner({ params }: { params: Promise<{ id: string }> }) {
     : doc?.chapterTitle || 'Translation Review';
 
   const hasChunks = doc?.chunkData && doc.chunkData.length > 0;
+  const currentChunkData = hasChunks && doc?.chunkData
+    ? doc.chunkData[Math.min(currentChunk - 1, doc.chunkData.length - 1)]
+    : null;
+  const currentFlags = currentChunkData?.flags ?? [];
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
-      {/* Header */}
-      <header style={{
-        background: 'var(--bg-white)', borderBottom: '1px solid var(--border)',
-        padding: '10px 16px', position: 'sticky', top: 0, zIndex: 100,
-      }}>
-        {/* Top row: title + hamburger */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-          <div style={{ fontFamily: '"Cormorant Garamond", serif', fontWeight: 300, fontSize: 18, color: 'var(--text)', letterSpacing: '-0.3px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, minWidth: 0 }}>
-            {fetching ? 'Loading…' : error ? 'Error' : title}
+    <div className="flex flex-col min-h-screen bg-background">
+      <header className="sticky top-0 z-50 bg-paper/95 backdrop-blur border-b">
+        <div className="px-4 sm:px-5 py-3 mx-auto max-w-5xl">
+          <div className="flex items-center justify-between gap-2">
+            <div className="font-serif text-lg text-foreground truncate flex-1 min-w-0">
+              {fetching ? 'Loading…' : error ? 'Error' : title}
+            </div>
+            <div className="relative shrink-0">
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => setMenuOpen(!menuOpen)}
+                aria-label="Open menu"
+                className="min-h-[44px] min-w-[44px]"
+              >
+                <span aria-hidden className="text-base">☰</span>
+              </Button>
+              {menuOpen && (
+                <>
+                  <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} aria-hidden />
+                  <div className="absolute right-0 top-12 z-20 max-w-[300px] w-[calc(100vw-32px)] rounded-md border bg-popover shadow-md overflow-hidden">
+                    <div className="px-3 py-2.5 border-b text-xs text-muted-foreground space-y-0.5">
+                      <div>{formatDate(doc?.createdAt ?? '')}</div>
+                      <div className="tabular-nums">
+                        {doc?.inputWordCount.toLocaleString()} source · {doc?.outputWordCount.toLocaleString()} translated
+                      </div>
+                      <div>by {doc?.email}</div>
+                      {currentChunkData && (
+                        <div className="pt-1.5">
+                          <FlagPill count={currentFlags.length} />
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        if (currentChunkData) {
+                          await navigator.clipboard.writeText(`${currentChunkData.originalGujarati}\n\n---\n\n${currentChunkData.translation}`);
+                          setCopied(true);
+                          setTimeout(() => setCopied(false), 2000);
+                        }
+                        setMenuOpen(false);
+                      }}
+                      className="block w-full text-left px-3 py-3 min-h-[44px] text-sm hover:bg-accent transition-colors"
+                    >
+                      {copied ? 'Copied!' : 'Copy chunk'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        await navigator.clipboard.writeText(window.location.href);
+                        setShareCopied(true);
+                        setTimeout(() => setShareCopied(false), 2000);
+                        setMenuOpen(false);
+                      }}
+                      className="block w-full text-left px-3 py-3 min-h-[44px] text-sm hover:bg-accent transition-colors"
+                    >
+                      {shareCopied ? 'Link copied!' : 'Share link'}
+                    </button>
+                    <div className="border-t" />
+                    {[
+                      { label: 'Pipeline', href: '/' },
+                      { label: 'History', href: '/history' },
+                    ].map(item => (
+                      <button
+                        key={item.href}
+                        type="button"
+                        onClick={() => { setMenuOpen(false); router.push(item.href); }}
+                        className="block w-full text-left px-3 py-3 min-h-[44px] text-sm hover:bg-accent transition-colors"
+                      >
+                        {item.label}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
           </div>
-          <div style={{ position: 'relative', flexShrink: 0 }}>
-          <button
-            onClick={() => setMenuOpen(!menuOpen)}
-            style={{
-              width: 32, height: 32, borderRadius: 6,
-              border: '1px solid var(--border)', background: 'var(--bg-white)',
-              cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: 16, color: 'var(--text-light)', lineHeight: 1,
-            }}
-          >
-            &#9776;
-          </button>
-          {menuOpen && (
-            <>
-              <div onClick={() => setMenuOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 9 }} />
-              <div style={{
-                position: 'fixed', top: 56, right: 8, zIndex: 10,
-                background: 'var(--bg-white)', border: '1px solid var(--border)',
-                borderRadius: 10, boxShadow: '0 4px 16px rgba(0,0,0,0.1)',
-                overflow: 'hidden', maxWidth: 300, width: '100%',
-              }}>
-                {/* Info */}
-                <div style={{ padding: '10px 16px', borderBottom: '1px solid var(--border)', fontSize: 12, color: 'var(--text-muted)', fontWeight: 300, lineHeight: 1.7 }}>
-                  <div>{formatDate(doc?.createdAt ?? '')}</div>
-                  <div>{doc?.inputWordCount.toLocaleString()} source · {doc?.outputWordCount.toLocaleString()} translated</div>
-                  <div>by {doc?.email}</div>
-                  {doc && <div style={{ marginTop: 4 }}><ScoreBadge score={doc.avgScore} /></div>}
-                  {hasChunks && doc?.chunkData && (() => {
-                    const chunk = doc.chunkData[Math.min(currentChunk - 1, doc.chunkData.length - 1)];
-                    return chunk?.reviewerScore != null ? (
-                      <div style={{ marginTop: 4 }}>Chunk: <ScoreBadge score={chunk.reviewerScore} /></div>
-                    ) : null;
-                  })()}
-                </div>
-                {/* Actions */}
-                <button
-                  onClick={async () => {
-                    if (hasChunks && doc?.chunkData) {
-                      const chunk = doc.chunkData[Math.min(currentChunk - 1, doc.chunkData.length - 1)];
-                      if (chunk) await navigator.clipboard.writeText(`${chunk.originalGujarati}\n\n---\n\n${chunk.translation}`);
-                    }
-                    setCopied(true); setTimeout(() => setCopied(false), 2000); setMenuOpen(false);
-                  }}
-                  style={{ display: 'block', width: '100%', padding: '10px 16px', border: 'none', background: 'none', textAlign: 'left', fontFamily: "'Karla', sans-serif", fontSize: 13, color: 'var(--text-muted)', cursor: 'pointer' }}
-                >
-                  {copied ? 'Copied!' : 'Copy Chunk'}
-                </button>
-                <button
-                  onClick={async () => {
-                    await navigator.clipboard.writeText(window.location.href);
-                    setShareCopied(true); setTimeout(() => setShareCopied(false), 2000); setMenuOpen(false);
-                  }}
-                  style={{ display: 'block', width: '100%', padding: '10px 16px', border: 'none', background: 'none', textAlign: 'left', fontFamily: "'Karla', sans-serif", fontSize: 13, color: 'var(--text-muted)', cursor: 'pointer' }}
-                >
-                  {shareCopied ? 'Link Copied!' : 'Share Link'}
-                </button>
-                <div style={{ borderTop: '1px solid var(--border)' }} />
-                {[
-                  { label: 'Pipeline', href: '/' },
-                  { label: 'History', href: '/history' },
-                ].map(item => (
-                  <button
-                    key={item.href}
-                    onClick={() => { setMenuOpen(false); router.push(item.href); }}
-                    style={{
-                      display: 'block', width: '100%', padding: '10px 16px',
-                      border: 'none', background: 'none', textAlign: 'left',
-                      fontFamily: "'Karla', sans-serif", fontSize: 13, color: 'var(--text-muted)',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    {item.label}
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
-          </div>
-        </div>
 
-        {/* Bottom row: prev/next chunk nav */}
-        {hasChunks && doc?.chunkData && doc.chunkData.length > 1 && (
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-start', gap: 8, marginTop: 8 }}>
-            <button
-              onClick={() => { if (currentChunk > 1) { router.push(`/review/${id}?chunk=${currentChunk - 1}`); window.scrollTo(0, 0); } }}
-              disabled={currentChunk <= 1}
-              style={{
-                padding: '4px 14px', border: '1px solid var(--border)', borderRadius: 6,
-                background: 'var(--bg-white)', cursor: currentChunk <= 1 ? 'not-allowed' : 'pointer',
-                opacity: currentChunk <= 1 ? 0.4 : 1,
-                fontFamily: "'Karla', sans-serif", fontSize: 13, color: 'var(--text-light)',
-              }}
-            >
-              ←
-            </button>
-            <span style={{ fontSize: 11, color: 'var(--text-muted)', fontWeight: 300 }}>
-              {currentChunk} / {doc.chunkData.length}
-            </span>
-            <button
-              onClick={() => { if (currentChunk < doc.chunkData!.length) { router.push(`/review/${id}?chunk=${currentChunk + 1}`); window.scrollTo(0, 0); } }}
-              disabled={currentChunk >= doc.chunkData.length}
-              style={{
-                padding: '4px 14px', border: '1px solid var(--border)', borderRadius: 6,
-                background: 'var(--bg-white)', cursor: currentChunk >= doc.chunkData.length ? 'not-allowed' : 'pointer',
-                opacity: currentChunk >= doc.chunkData.length ? 0.4 : 1,
-                fontFamily: "'Karla', sans-serif", fontSize: 13, color: 'var(--text-light)',
-              }}
-            >
-              →
-            </button>
-          </div>
-        )}
+          {hasChunks && doc?.chunkData && doc.chunkData.length > 1 && (
+            <div className="flex items-center gap-2 mt-2">
+              <Button
+                variant="outline"
+                size="sm"
+                className="min-h-[40px] sm:min-h-0 px-3"
+                onClick={() => { if (currentChunk > 1) { router.push(`/review/${id}?chunk=${currentChunk - 1}`); window.scrollTo(0, 0); } }}
+                disabled={currentChunk <= 1}
+              >
+                ←
+              </Button>
+              <span className="text-xs text-muted-foreground tabular-nums">
+                {currentChunk} / {doc.chunkData.length}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                className="min-h-[40px] sm:min-h-0 px-3"
+                onClick={() => { if (currentChunk < doc.chunkData!.length) { router.push(`/review/${id}?chunk=${currentChunk + 1}`); window.scrollTo(0, 0); } }}
+                disabled={currentChunk >= doc.chunkData.length}
+              >
+                →
+              </Button>
+            </div>
+          )}
+        </div>
       </header>
 
-      <div style={{ padding: isMobile ? '12px 0' : '24px 20px', maxWidth: 1200, margin: '0 auto', width: '100%' }}>
+      <main className={cn('mx-auto w-full max-w-6xl', isMobile ? 'px-0 py-3' : 'px-5 py-6')}>
         {error && (
-          <div style={{ background: 'var(--red-bg)', border: '1px solid var(--red-border)', borderRadius: 8, padding: '14px 18px', fontSize: 13, color: 'var(--red)', marginBottom: 20 }}>
+          <div className="mb-4 mx-4 sm:mx-0 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2.5 text-sm text-destructive">
             {error}
           </div>
         )}
 
         {fetching ? (
-          <div style={{ textAlign: 'center', padding: '48px 20px' }}>
-            <div style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 20, color: 'var(--text-muted)', fontStyle: 'italic' }}>Loading translation…</div>
+          <div className="text-center py-12">
+            <div className="font-serif italic text-xl text-muted-foreground">Loading translation…</div>
           </div>
         ) : doc && (
           <>
-            {/* Desktop info bar */}
             {!isMobile && (
-              <div style={{
-                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                marginBottom: 16, flexWrap: 'wrap', gap: 8,
-              }}>
-                <div style={{ fontSize: 12, color: 'var(--text-muted)', fontWeight: 300, display: 'flex', flexWrap: 'wrap', gap: '2px 14px', alignItems: 'center' }}>
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+                <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground tabular-nums">
                   <span>{formatDate(doc.createdAt)}</span>
                   <span>{doc.inputWordCount.toLocaleString()} source</span>
                   <span>{doc.outputWordCount.toLocaleString()} translated</span>
                   <span>by {doc.email}</span>
                 </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <ScoreBadge score={doc.avgScore} />
-                  {hasChunks && doc.chunkData && (() => {
-                    const chunk = doc.chunkData[Math.min(currentChunk - 1, doc.chunkData.length - 1)];
-                    return chunk?.reviewerScore != null ? <ScoreBadge score={chunk.reviewerScore} /> : null;
-                  })()}
-                </div>
+                {currentChunkData && <FlagPill count={currentFlags.length} />}
               </div>
             )}
 
-            {/* Chunk review */}
-            {(() => {
-              const allChunks = hasChunks ? doc.chunkData! : [];
-              const idx = Math.min(currentChunk - 1, Math.max(allChunks.length - 1, 0));
-              const chunk = allChunks[idx];
+            {/* Self-flags inline panel for the current chunk */}
+            {currentFlags.length > 0 && (
+              <div className="mx-4 sm:mx-0 mb-3 rounded-md border bg-paper-warm/60 px-3 py-2.5">
+                <div className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground mb-1.5">
+                  Translator self-flags
+                </div>
+                <ul className="space-y-1 text-xs text-muted-foreground">
+                  {currentFlags.map((f, i) => (
+                    <li key={i} className="leading-relaxed">• {f}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
 
-              return chunk ? <ChunkReview chunk={chunk} isMobile={isMobile} showSource={showSource} onToggleSource={() => setShowSource(!showSource)} /> : null;
-            })()}
+            {currentChunkData && (
+              isMobile
+                ? <ChunkReviewMobile chunk={currentChunkData} showSource={showSource} onToggle={() => setShowSource(!showSource)} />
+                : <ChunkReviewDesktop chunk={currentChunkData} />
+            )}
           </>
         )}
-      </div>
+      </main>
     </div>
   );
 }

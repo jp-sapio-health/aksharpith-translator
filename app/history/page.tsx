@@ -3,6 +3,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../../lib/auth-context';
 import { useRouter } from 'next/navigation';
+import { Button } from '../../components/ui/button';
+import { cn } from '../../lib/utils';
 
 interface Translation {
   id: string;
@@ -13,7 +15,10 @@ interface Translation {
   totalChapters: number | null;
   inputWordCount: number;
   outputWordCount: number;
-  avgScore: number;
+  /** Reviewer telemetry — admin only when present. Not displayed in user view. */
+  avgScore?: number;
+  /** Translator self-flags (PR 4 contract). Surfaced inline. */
+  flagsCount?: number;
   output: string;
   inputPreview: string;
   email: string;
@@ -25,7 +30,7 @@ interface BookGroup {
   bookTitle: string;
   chapters: Translation[];
   totalWords: number;
-  avgScore: number;
+  totalFlags: number;
   createdAt: string;
   email: string;
 }
@@ -50,25 +55,21 @@ function groupTranslations(translations: Translation[]): HistoryItem[] {
 
   for (const [bookId, chapters] of bookMap) {
     chapters.sort((a, b) => (a.chapterIndex ?? 0) - (b.chapterIndex ?? 0));
-    const totalWords = chapters.reduce((s, c) => s + c.outputWordCount, 0);
-    const avgScore = Math.round(chapters.reduce((s, c) => s + c.avgScore, 0) / chapters.length);
     items.push({
       type: 'book',
       book: {
         bookId,
         bookTitle: chapters[0].bookTitle || 'Untitled Book',
         chapters,
-        totalWords,
-        avgScore,
+        totalWords: chapters.reduce((s, c) => s + c.outputWordCount, 0),
+        totalFlags: chapters.reduce((s, c) => s + (c.flagsCount ?? 0), 0),
         createdAt: chapters[0].createdAt,
         email: chapters[0].email,
       },
     });
   }
 
-  for (const t of singles) {
-    items.push({ type: 'single', translation: t });
-  }
+  for (const t of singles) items.push({ type: 'single', translation: t });
 
   items.sort((a, b) => {
     const dateA = a.type === 'book' ? a.book.createdAt : a.translation.createdAt;
@@ -77,6 +78,12 @@ function groupTranslations(translations: Translation[]): HistoryItem[] {
   });
 
   return items;
+}
+
+function formatDate(iso: string) {
+  const d = new Date(iso);
+  return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) + ' ' +
+         d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
 }
 
 export default function HistoryPage() {
@@ -119,9 +126,7 @@ export default function HistoryPage() {
     }
   }, [getIdToken]);
 
-  useEffect(() => {
-    if (user) fetchHistory();
-  }, [user, fetchHistory]);
+  useEffect(() => { if (user) fetchHistory(); }, [user, fetchHistory]);
 
   const handleLoadMore = async () => {
     if (!nextCursor || loadingMore) return;
@@ -164,9 +169,7 @@ export default function HistoryPage() {
         headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
         body: JSON.stringify({ id }),
       });
-      if (res.ok) {
-        setTranslations(prev => prev.filter(t => t.id !== id));
-      }
+      if (res.ok) setTranslations(prev => prev.filter(t => t.id !== id));
     } catch { /* ignore */ }
     setDeleting(null);
   };
@@ -190,73 +193,62 @@ export default function HistoryPage() {
 
   if (loading || !user) {
     return (
-      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg)' }}>
-        <div style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 20, color: 'var(--text-muted)', fontStyle: 'italic' }}>Loading…</div>
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="font-serif italic text-xl text-muted-foreground">Loading…</div>
       </div>
     );
   }
 
-  const formatDate = (iso: string) => {
-    const d = new Date(iso);
-    return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) + ' ' +
-           d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
-  };
+  const items = groupTranslations(translations);
 
-  const scoreBadge = (score: number) => {
-    const tier = score >= 90 ? { label: 'Publication Ready', bg: 'var(--green-bg)', color: 'var(--green)', border: 'var(--green-border)' }
-      : score >= 80 ? { label: 'Strong', bg: 'var(--green-bg)', color: 'var(--green)', border: 'var(--green-border)' }
-      : score >= 70 ? { label: 'Revised', bg: 'var(--amber-bg)', color: 'var(--amber)', border: 'var(--amber-border)' }
-      : { label: 'Needs Work', bg: 'var(--amber-bg)', color: 'var(--amber)', border: 'var(--amber-border)' };
+  /** Inline pill: 0 flags = green, 1–2 = amber, 3+ = orange. Mirrors page.tsx. */
+  const flagPill = (count: number | undefined) => {
+    const c = count ?? 0;
+    const tone =
+      c === 0 ? 'bg-[oklch(0.94_0.04_145)] text-[oklch(0.40_0.10_145)] border-[oklch(0.85_0.04_145)]' :
+      c <= 2 ? 'bg-[oklch(0.95_0.04_75)] text-[oklch(0.40_0.11_75)] border-[oklch(0.86_0.04_75)]' :
+      'bg-[oklch(0.95_0.04_45)] text-[oklch(0.42_0.13_45)] border-[oklch(0.85_0.05_45)]';
     return (
-      <span style={{
-        fontSize: 10, fontWeight: 600, letterSpacing: '0.8px', textTransform: 'uppercase',
-        padding: '3px 10px', borderRadius: 3,
-        background: tier.bg, color: tier.color, border: `1px solid ${tier.border}`,
-      }}>
-        {score}% · {tier.label}
+      <span className={cn('inline-flex items-center gap-1 rounded border px-2 py-0.5 text-[10px] font-mono uppercase tracking-wider', tone)}>
+        {c === 0 ? 'no flags' : `${c} flag${c === 1 ? '' : 's'}`}
       </span>
     );
   };
 
-  const items = groupTranslations(translations);
-
   const renderChapterCard = (t: Translation) => {
     const isChExpanded = expandedChapterId === t.id;
     return (
-      <div key={t.id} style={{ border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden', background: 'var(--bg)' }}>
-        <div
+      <div key={t.id} className="rounded-md border bg-background overflow-hidden">
+        <button
+          type="button"
           onClick={() => setExpandedChapterId(isChExpanded ? null : t.id)}
-          style={{ padding: '12px 16px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}
+          className="w-full text-left px-3 py-3 sm:px-4 min-h-[48px] flex items-center justify-between gap-2 hover:bg-paper-warm transition-colors"
         >
-          <div>
-            <div style={{ fontSize: 14, fontWeight: 400, color: 'var(--text)' }}>
+          <div className="min-w-0 flex-1">
+            <div className="text-sm text-foreground truncate">
               {t.chapterIndex != null ? `${String(t.chapterIndex + 1).padStart(2, '0')}. ` : ''}{t.chapterTitle || 'Untitled'}
             </div>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2, fontWeight: 300 }}>
+            <div className="text-[11px] text-muted-foreground mt-0.5 tabular-nums">
               {t.outputWordCount.toLocaleString()} words
             </div>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            {scoreBadge(t.avgScore)}
-            <span style={{ fontSize: 12, color: 'var(--text-light)', transform: isChExpanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }}>▾</span>
+          <div className="flex items-center gap-2 shrink-0">
+            {flagPill(t.flagsCount)}
+            <span className={cn('text-xs text-muted-foreground transition-transform', isChExpanded && 'rotate-180')}>▾</span>
           </div>
-        </div>
+        </button>
         {isChExpanded && (
-          <div style={{ borderTop: '1px solid var(--border)', padding: '12px 16px' }}>
-            <div style={{
-              background: 'var(--bg-white)', border: '1px solid var(--border)', borderRadius: 6, padding: 14,
-              fontFamily: '"Cormorant Garamond", serif', fontSize: 15, lineHeight: 1.8,
-              color: 'var(--text-body, var(--text))', whiteSpace: 'pre-wrap', maxHeight: 300, overflow: 'auto',
-            }}>
+          <div className="border-t px-3 py-3 sm:px-4">
+            <div className="rounded-md border bg-paper p-3 sm:p-4 font-serif text-[15px] leading-[1.8] text-foreground whitespace-pre-wrap max-h-72 overflow-auto">
               {t.output}
             </div>
-            <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-              <button onClick={() => handleCopy(t.id, t.output)} style={{ padding: '6px 12px', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg-white)', color: 'var(--text-muted)', fontFamily: "'Karla', sans-serif", fontSize: 10, fontWeight: 600, letterSpacing: '1px', textTransform: 'uppercase', cursor: 'pointer' }}>
+            <div className="flex flex-wrap gap-2 mt-3">
+              <Button variant="outline" size="sm" className="min-h-[44px] sm:min-h-0 font-mono text-[10px] uppercase tracking-wider" onClick={() => handleCopy(t.id, t.output)}>
                 {copied === t.id ? 'Copied' : 'Copy'}
-              </button>
-              <button onClick={() => handleDownloadSingle(t)} style={{ padding: '6px 12px', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg-white)', color: 'var(--text-muted)', fontFamily: "'Karla', sans-serif", fontSize: 10, fontWeight: 600, letterSpacing: '1px', textTransform: 'uppercase', cursor: 'pointer' }}>
+              </Button>
+              <Button variant="outline" size="sm" className="min-h-[44px] sm:min-h-0 font-mono text-[10px] uppercase tracking-wider" onClick={() => handleDownloadSingle(t)}>
                 Download
-              </button>
+              </Button>
             </div>
           </div>
         )}
@@ -265,102 +257,110 @@ export default function HistoryPage() {
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
-      <header style={{ background: 'var(--bg-white)', borderBottom: '1px solid var(--border)', padding: '10px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div style={{ fontFamily: '"Cormorant Garamond", serif', fontWeight: 300, fontSize: 22, color: 'var(--text)', letterSpacing: '-0.3px' }}>
-          Translation <em>History</em>
-        </div>
-        <div style={{ position: 'relative' }}>
-          <button
-            onClick={() => setHistoryMenuOpen(!historyMenuOpen)}
-            style={{
-              width: 32, height: 32, borderRadius: 6,
-              border: '1px solid var(--border)', background: 'var(--bg-white)',
-              cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: 16, color: 'var(--text-light)', lineHeight: 1,
-            }}
-          >
-            &#9776;
-          </button>
-          {historyMenuOpen && (
-            <>
-              <div onClick={() => setHistoryMenuOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 9 }} />
-              <div style={{
-                position: 'absolute', top: 38, right: 0, zIndex: 10,
-                background: 'var(--bg-white)', border: '1px solid var(--border)',
-                borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,0.1)',
-                overflow: 'hidden', minWidth: 140,
-              }}>
-                <button onClick={() => { setHistoryMenuOpen(false); router.push('/'); }} style={{ display: 'block', width: '100%', padding: '10px 16px', border: 'none', background: 'none', textAlign: 'left', fontFamily: "'Karla', sans-serif", fontSize: 13, color: 'var(--text-muted)', cursor: 'pointer' }}>
-                  Pipeline
-                </button>
-              </div>
-            </>
-          )}
+    <div className="flex flex-col min-h-screen bg-background">
+      <header className="sticky top-0 z-50 bg-paper/95 backdrop-blur border-b">
+        <div className="mx-auto max-w-3xl px-4 sm:px-5 py-3 flex items-center justify-between">
+          <div className="font-serif text-xl text-foreground">
+            Translation <em className="italic font-normal">History</em>
+          </div>
+          <div className="relative">
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => setHistoryMenuOpen(!historyMenuOpen)}
+              aria-label="Open menu"
+              className="min-h-[44px] min-w-[44px]"
+            >
+              <span aria-hidden className="text-base">☰</span>
+            </Button>
+            {historyMenuOpen && (
+              <>
+                <div className="fixed inset-0 z-10" onClick={() => setHistoryMenuOpen(false)} aria-hidden />
+                <div className="absolute right-0 top-12 z-20 min-w-[180px] rounded-md border bg-popover shadow-md overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => { setHistoryMenuOpen(false); router.push('/'); }}
+                    className="block w-full text-left px-3 py-3 min-h-[44px] text-sm hover:bg-accent transition-colors"
+                  >
+                    Pipeline
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
         </div>
       </header>
 
-      <div style={{ padding: '16px 10px', maxWidth: 780, margin: '0 auto', width: '100%' }}>
+      <main className="mx-auto w-full max-w-3xl px-4 sm:px-5 py-4 sm:py-6">
         {error && (
-          <div style={{ background: 'var(--red-bg)', border: '1px solid var(--red-border)', borderRadius: 8, padding: '14px 18px', fontSize: 13, color: 'var(--red)', marginBottom: 20 }}>
+          <div className="mb-4 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2.5 text-sm text-destructive">
             {error}
           </div>
         )}
 
         {fetching ? (
-          <div style={{ textAlign: 'center', padding: '48px 20px' }}>
-            <div style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 20, color: 'var(--text-muted)', fontStyle: 'italic' }}>
-              Loading translations…
-            </div>
+          <div className="text-center py-12">
+            <div className="font-serif italic text-xl text-muted-foreground">Loading translations…</div>
           </div>
         ) : items.length === 0 ? (
-          <div style={{ textAlign: 'center', padding: '48px 20px' }}>
-            <div style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 20, color: 'var(--text-muted)', fontStyle: 'italic' }}>
-              No translations yet
-            </div>
-            <p style={{ fontSize: 13, color: 'var(--text-light)', marginTop: 8 }}>
+          <div className="text-center py-12">
+            <div className="font-serif italic text-xl text-muted-foreground">No translations yet</div>
+            <p className="text-sm text-muted-foreground/70 mt-2">
               Run the translation pipeline to see results here.
             </p>
           </div>
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <div style={{ fontSize: 12, color: 'var(--text-light)', marginBottom: 4 }}>
+          <div className="flex flex-col gap-2">
+            <div className="text-xs text-muted-foreground mb-1 tabular-nums">
               {items.length} item{items.length !== 1 ? 's' : ''} · {translations.length} translation{translations.length !== 1 ? 's' : ''}
             </div>
 
             {items.map(item => {
               if (item.type === 'single') {
                 const t = item.translation;
-                const isExpanded2 = expandedId === t.id;
+                const isExpanded = expandedId === t.id;
                 return (
-                  <div key={t.id} style={{ background: 'var(--bg-white)', border: '1px solid var(--border)', borderRadius: 'var(--radius, 8px)', overflow: 'hidden' }}>
-                    <div onClick={() => setExpandedId(isExpanded2 ? null : t.id)} style={{ padding: '14px 16px', cursor: 'pointer' }}>
-                      <div style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 17, fontWeight: 400, color: 'var(--text)', lineHeight: 1.4, marginBottom: 6, wordBreak: 'break-word' }}>
+                  <div key={t.id} className="rounded-md border bg-paper overflow-hidden">
+                    <button
+                      type="button"
+                      onClick={() => setExpandedId(isExpanded ? null : t.id)}
+                      className="w-full text-left px-3 py-3 sm:px-4 min-h-[48px] hover:bg-paper-warm transition-colors"
+                    >
+                      <div className="font-serif text-base sm:text-lg text-foreground leading-snug mb-1.5 break-words">
                         {t.chapterTitle || 'Untitled Translation'}
                       </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                        {scoreBadge(t.avgScore)}
-                        <button onClick={(e) => { e.stopPropagation(); router.push(`/review/${t.id}`); }} style={{ padding: '4px 14px', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg-white)', cursor: 'pointer', fontFamily: "'Karla', sans-serif", fontSize: 13, color: 'var(--text-light)', marginLeft: 'auto' }}>
+                      <div className="flex items-center flex-wrap gap-2">
+                        {flagPill(t.flagsCount)}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={(e) => { e.stopPropagation(); router.push(`/review/${t.id}`); }}
+                          className="ml-auto min-h-[40px] sm:min-h-0 px-3 text-muted-foreground"
+                        >
                           →
-                        </button>
+                        </Button>
                       </div>
-                      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4, fontWeight: 300 }}>
+                      <div className="text-[11px] text-muted-foreground mt-1.5 tabular-nums">
                         {formatDate(t.createdAt)} · {t.outputWordCount.toLocaleString()} words · {t.email}
                       </div>
-                    </div>
-                    {isExpanded2 && (
-                      <div style={{ borderTop: '1px solid var(--border)', padding: '12px 16px' }}>
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                          <button onClick={() => router.push(`/review/${t.id}`)} style={{ padding: '6px 12px', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg-white)', color: 'var(--text-muted)', fontFamily: "'Karla', sans-serif", fontSize: 10, fontWeight: 600, letterSpacing: '1px', textTransform: 'uppercase', cursor: 'pointer' }}>Review</button>
-                          <button onClick={() => handleCopy(t.id, t.output)} style={{ padding: '6px 12px', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg-white)', color: 'var(--text-muted)', fontFamily: "'Karla', sans-serif", fontSize: 10, fontWeight: 600, letterSpacing: '1px', textTransform: 'uppercase', cursor: 'pointer' }}>
+                    </button>
+                    {isExpanded && (
+                      <div className="border-t px-3 py-3 sm:px-4">
+                        <div className="flex flex-wrap gap-2">
+                          <Button variant="outline" size="sm" className="min-h-[44px] sm:min-h-0 font-mono text-[10px] uppercase tracking-wider" onClick={() => router.push(`/review/${t.id}`)}>Review</Button>
+                          <Button variant="outline" size="sm" className="min-h-[44px] sm:min-h-0 font-mono text-[10px] uppercase tracking-wider" onClick={() => handleCopy(t.id, t.output)}>
                             {copied === t.id ? 'Copied' : 'Copy'}
-                          </button>
-                          <button onClick={() => handleDownloadSingle(t)} style={{ padding: '6px 12px', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg-white)', color: 'var(--text-muted)', fontFamily: "'Karla', sans-serif", fontSize: 10, fontWeight: 600, letterSpacing: '1px', textTransform: 'uppercase', cursor: 'pointer' }}>
-                            Download
-                          </button>
-                          <button onClick={() => handleDelete(t.id)} disabled={deleting === t.id} style={{ padding: '6px 12px', border: '1px solid var(--red-border)', borderRadius: 6, background: 'var(--red-bg)', color: 'var(--red)', fontFamily: "'Karla', sans-serif", fontSize: 10, fontWeight: 600, letterSpacing: '1px', textTransform: 'uppercase', cursor: 'pointer' }}>
-                            {deleting === t.id ? 'Deleting\u2026' : 'Delete'}
-                          </button>
+                          </Button>
+                          <Button variant="outline" size="sm" className="min-h-[44px] sm:min-h-0 font-mono text-[10px] uppercase tracking-wider" onClick={() => handleDownloadSingle(t)}>Download</Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="min-h-[44px] sm:min-h-0 font-mono text-[10px] uppercase tracking-wider border-destructive/40 text-destructive hover:bg-destructive/5"
+                            onClick={() => handleDelete(t.id)}
+                            disabled={deleting === t.id}
+                          >
+                            {deleting === t.id ? 'Deleting…' : 'Delete'}
+                          </Button>
                         </div>
                       </div>
                     )}
@@ -368,34 +368,58 @@ export default function HistoryPage() {
                 );
               }
 
-              // Book group
               const book = item.book;
               const isBookExpanded = expandedId === book.bookId;
               return (
-                <div key={book.bookId} style={{ background: 'var(--bg-white)', border: '1px solid var(--border)', borderRadius: 'var(--radius, 8px)', overflow: 'hidden' }}>
-                  <div onClick={() => setExpandedId(isBookExpanded ? null : book.bookId)} style={{ padding: '14px 16px', cursor: 'pointer' }}>
-                    <div style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 17, fontWeight: 400, color: 'var(--text)', lineHeight: 1.4, marginBottom: 6, wordBreak: 'break-word' }}>
+                <div key={book.bookId} className="rounded-md border bg-paper overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => setExpandedId(isBookExpanded ? null : book.bookId)}
+                    className="w-full text-left px-3 py-3 sm:px-4 min-h-[48px] hover:bg-paper-warm transition-colors"
+                  >
+                    <div className="font-serif text-base sm:text-lg text-foreground leading-snug mb-1.5 break-words">
                       {book.bookTitle}
                     </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                      {scoreBadge(book.avgScore)}
-                      <button onClick={(e) => { e.stopPropagation(); router.push(`/review/${book.chapters[0]?.id ?? ''}`); }} style={{ padding: '4px 14px', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg-white)', cursor: 'pointer', fontFamily: "'Karla', sans-serif", fontSize: 13, color: 'var(--text-light)', marginLeft: 'auto' }}>
+                    <div className="flex items-center flex-wrap gap-2">
+                      {flagPill(book.totalFlags)}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={(e) => { e.stopPropagation(); router.push(`/review/${book.chapters[0]?.id ?? ''}`); }}
+                        className="ml-auto min-h-[40px] sm:min-h-0 px-3 text-muted-foreground"
+                      >
                         →
-                      </button>
+                      </Button>
                     </div>
-                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4, fontWeight: 300 }}>
+                    <div className="text-[11px] text-muted-foreground mt-1.5 tabular-nums">
                       {formatDate(book.createdAt)} · {book.chapters.length} chapters · {book.totalWords.toLocaleString()} words · {book.email}
                     </div>
-                  </div>
+                  </button>
                   {isBookExpanded && (
-                    <div style={{ borderTop: '1px solid var(--border)', padding: '12px 16px' }}>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                          <button onClick={() => router.push(`/review/${book.chapters[0]?.id ?? ''}`)} style={{ padding: '6px 12px', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg-white)', color: 'var(--text-muted)', fontFamily: "'Karla', sans-serif", fontSize: 10, fontWeight: 600, letterSpacing: '1px', textTransform: 'uppercase', cursor: 'pointer' }}>Review</button>
-                          <button onClick={() => handleCopy(book.bookId, book.chapters.map(c => c.output).join('\n\n'))} style={{ padding: '6px 12px', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg-white)', color: 'var(--text-muted)', fontFamily: "'Karla', sans-serif", fontSize: 10, fontWeight: 600, letterSpacing: '1px', textTransform: 'uppercase', cursor: 'pointer' }}>{copied === book.bookId ? 'Copied' : 'Copy Book'}</button>
-                          <button onClick={() => handleDownloadBook(book)} style={{ padding: '6px 12px', border: '1px solid var(--border)', borderRadius: 6, background: 'var(--bg-white)', color: 'var(--text-muted)', fontFamily: "'Karla', sans-serif", fontSize: 10, fontWeight: 600, letterSpacing: '1px', textTransform: 'uppercase', cursor: 'pointer' }}>Download</button>
-                          <button onClick={() => handleDeleteBook(book)} disabled={deleting === book.bookId} style={{ padding: '6px 12px', border: '1px solid var(--red-border)', borderRadius: 6, background: 'var(--red-bg)', color: 'var(--red)', fontFamily: "'Karla', sans-serif", fontSize: 10, fontWeight: 600, letterSpacing: '1px', textTransform: 'uppercase', cursor: 'pointer' }}>{deleting === book.bookId ? 'Deleting\u2026' : 'Delete'}</button>
-                        </div>
+                    <div className="border-t px-3 py-3 sm:px-4 space-y-3">
+                      <div className="flex flex-wrap gap-2">
+                        <Button variant="outline" size="sm" className="min-h-[44px] sm:min-h-0 font-mono text-[10px] uppercase tracking-wider" onClick={() => router.push(`/review/${book.chapters[0]?.id ?? ''}`)}>Review</Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="min-h-[44px] sm:min-h-0 font-mono text-[10px] uppercase tracking-wider"
+                          onClick={() => handleCopy(book.bookId, book.chapters.map(c => c.output).join('\n\n'))}
+                        >
+                          {copied === book.bookId ? 'Copied' : 'Copy book'}
+                        </Button>
+                        <Button variant="outline" size="sm" className="min-h-[44px] sm:min-h-0 font-mono text-[10px] uppercase tracking-wider" onClick={() => handleDownloadBook(book)}>Download</Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="min-h-[44px] sm:min-h-0 font-mono text-[10px] uppercase tracking-wider border-destructive/40 text-destructive hover:bg-destructive/5"
+                          onClick={() => handleDeleteBook(book)}
+                          disabled={deleting === book.bookId}
+                        >
+                          {deleting === book.bookId ? 'Deleting…' : 'Delete'}
+                        </Button>
+                      </div>
+                      <div className="space-y-2">
+                        {book.chapters.map(renderChapterCard)}
                       </div>
                     </div>
                   )}
@@ -404,25 +428,18 @@ export default function HistoryPage() {
             })}
 
             {nextCursor && (
-              <button
+              <Button
+                variant="outline"
                 onClick={handleLoadMore}
                 disabled={loadingMore}
-                style={{
-                  width: '100%', padding: '14px 24px', marginTop: 8,
-                  border: '1px solid var(--border)', borderRadius: 'var(--radius, 8px)',
-                  background: 'var(--bg-white)', color: 'var(--text-muted)',
-                  fontFamily: "'Karla', sans-serif", fontSize: 12, fontWeight: 600,
-                  letterSpacing: '1px', textTransform: 'uppercase',
-                  cursor: loadingMore ? 'not-allowed' : 'pointer',
-                  opacity: loadingMore ? 0.6 : 1,
-                }}
+                className="w-full min-h-[48px] mt-2 font-mono text-[11px] uppercase tracking-wider"
               >
-                {loadingMore ? 'Loading...' : 'Load More'}
-              </button>
+                {loadingMore ? 'Loading…' : 'Load more'}
+              </Button>
             )}
           </div>
         )}
-      </div>
+      </main>
     </div>
   );
 }

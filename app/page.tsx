@@ -10,6 +10,9 @@ import DocumentRenderer from './components/DocumentRenderer';
 import ReviewPanel from './components/ReviewPanel';
 import DownloadMenu from './components/DownloadMenu';
 import QualitySummary from './components/QualitySummary';
+import { Button } from '../components/ui/button';
+import { Badge } from '../components/ui/badge';
+import { cn } from '../lib/utils';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -114,6 +117,8 @@ function StageCard({ stage, commentary }: { stage: StageState; commentary?: stri
           <span style={{ fontFamily: '"Cormorant Garamond", serif', fontSize: 22, fontWeight: 400, color: (s === 'running' || s === 'done') ? 'var(--text)' : 'var(--text-muted)', transition: 'color 0.3s' }}>{stage.label}</span>
         </div>
         {s === 'done'    && <span style={badgeStyle('strong')}>Done</span>}
+        {/* No spinner — progress is told in words via the commentary line below.
+            Per docs/redesign-brief.md principle 1. */}
         {s === 'running' && <span style={badgeStyle('running')}>Running <span className="spinning" style={{ marginLeft: 4 }}>{'\u25CC'}</span></span>}
         {s === 'error'   && <span style={badgeStyle('weak')}>Error</span>}
       </div>
@@ -121,21 +126,12 @@ function StageCard({ stage, commentary }: { stage: StageState; commentary?: stri
         {stage.msg || stage.tagline}
       </div>
       {s === 'running' && commentary && (
-        <div style={{ paddingLeft: 32, marginTop: 6, fontSize: 12, fontStyle: 'italic', color: 'var(--text-light)', transition: 'opacity 0.3s' }} className="fadein">
+        <div style={{ paddingLeft: 32, marginTop: 6, fontSize: 12, fontStyle: 'italic', color: 'var(--text-light)' }}>
           {commentary}
         </div>
       )}
-      {s === 'running' && (
-        <div style={{ paddingLeft: 32, marginTop: 10 }}>
-          <div style={{ height: 2, background: 'var(--border)', borderRadius: 2, overflow: 'hidden' }}>
-            {stage.progress !== null ? (
-              <div style={{ height: '100%', background: 'var(--amber)', borderRadius: 2, width: `${stage.progress}%`, transition: 'width 0.4s' }} />
-            ) : (
-              <div className="indeterminate-bar" style={{ height: '100%', background: 'var(--amber)', borderRadius: 2, width: '30%' }} />
-            )}
-          </div>
-        </div>
-      )}
+      {/* docs/redesign-brief.md: progress is in words, not bars. Removed the
+          indeterminate / determinate bar; the commentary line carries the signal. */}
     </div>
   );
 }
@@ -1183,75 +1179,80 @@ function HomeInner() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
 
-      {/* Header */}
-      <header ref={headerRef} style={{ background: 'var(--bg-white)', borderBottom: '1px solid var(--border)', position: 'sticky', top: 0, zIndex: 100, padding: '14px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-          <img src="/baps-logo.png" alt="BAPS" style={{ height: 44, width: 'auto', opacity: 0.85 }} />
-          <div>
-            <div style={{ fontSize: 10, fontWeight: 600, letterSpacing: 3, textTransform: 'uppercase', color: 'var(--text-light)', marginBottom: 2 }}>
-              Aksharpith
-            </div>
-            <div style={{ fontFamily: '"Cormorant Garamond", serif', fontWeight: 300, fontSize: 26, color: 'var(--text)', letterSpacing: '-0.3px' }}>
-              Translation <em>Pipeline</em>
-              <span style={{ fontFamily: "'Karla', sans-serif", fontSize: 10, fontWeight: 600, letterSpacing: 1, color: 'var(--text-light)', marginLeft: 12, verticalAlign: 'middle' }}>
-                6-STAGE
-              </span>
+      {/* Header — shadcn / Tailwind v4. Logo + serif title, ghost menu button. */}
+      <header ref={headerRef} className="sticky top-0 z-50 bg-paper/95 backdrop-blur border-b border-border">
+        <div className="mx-auto max-w-3xl px-5 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/baps-logo.png" alt="" className="h-9 w-auto opacity-85" />
+            <div>
+              <div className="text-[10px] font-mono uppercase tracking-[0.2em] text-muted-foreground">
+                Aksharpith
+              </div>
+              <div className="font-serif text-xl text-foreground leading-tight">
+                Translation <em className="italic font-normal">Pipeline</em>
+              </div>
             </div>
           </div>
-        </div>
-        {user && (
-          <div style={{ position: 'relative' }}>
-            <button
-              onClick={() => setMainMenuOpen(!mainMenuOpen)}
-              style={{
-                width: 32, height: 32, borderRadius: 6,
-                border: '1px solid var(--border)', background: 'var(--bg-white)',
-                cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
-                fontSize: 16, color: 'var(--text-light)', lineHeight: 1,
-              }}
-            >
-              &#9776;
-            </button>
-            {mainMenuOpen && (
-              <>
-                <div onClick={() => setMainMenuOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 9 }} />
-                <div style={{
-                  position: 'absolute', top: 38, right: 0, zIndex: 10,
-                  background: 'var(--bg-white)', border: '1px solid var(--border)',
-                  borderRadius: 8, boxShadow: '0 4px 16px rgba(0,0,0,0.1)',
-                  overflow: 'hidden', minWidth: 180,
-                }}>
-                  <div style={{ padding: '10px 16px', borderBottom: '1px solid var(--border)', fontSize: 12, color: 'var(--text-muted)', fontWeight: 300 }}>
-                    {user.email}
+          {user && (
+            <div className="relative">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setMainMenuOpen(!mainMenuOpen)}
+                aria-label="Menu"
+              >
+                ☰
+              </Button>
+              {mainMenuOpen && (
+                <>
+                  <div className="fixed inset-0 z-10" onClick={() => setMainMenuOpen(false)} />
+                  <div className="absolute right-0 top-10 z-20 min-w-[200px] rounded-md border bg-popover shadow-md overflow-hidden">
+                    <div className="px-3 py-2 border-b text-xs text-muted-foreground truncate font-mono">
+                      {user.email}
+                    </div>
+                    <button
+                      onClick={() => { setMainMenuOpen(false); router.push('/history'); }}
+                      className="block w-full text-left px-3 py-2 text-sm hover:bg-accent transition-colors"
+                    >
+                      History
+                    </button>
+                    <button
+                      onClick={() => { setMainMenuOpen(false); signOut(); }}
+                      className="block w-full text-left px-3 py-2 text-sm hover:bg-accent border-t transition-colors"
+                    >
+                      Sign out
+                    </button>
                   </div>
-                  <button onClick={() => { setMainMenuOpen(false); router.push('/history'); }} style={{ display: 'block', width: '100%', padding: '10px 16px', border: 'none', background: 'none', textAlign: 'left', fontFamily: "'Karla', sans-serif", fontSize: 13, color: 'var(--text-muted)', cursor: 'pointer' }}>
-                    History
-                  </button>
-                  <button onClick={() => { setMainMenuOpen(false); signOut(); }} style={{ display: 'block', width: '100%', padding: '10px 16px', border: 'none', background: 'none', textAlign: 'left', fontFamily: "'Karla', sans-serif", fontSize: 13, color: 'var(--text-muted)', cursor: 'pointer', borderTop: '1px solid var(--border)' }}>
-                    Sign out
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-        )}
+                </>
+              )}
+            </div>
+          )}
+        </div>
       </header>
 
-      {/* Tabs */}
-      <div style={{ display: 'flex', background: 'var(--bg-white)', borderBottom: '1px solid var(--border)', position: 'sticky', top: 'var(--header-h, 67px)', zIndex: 99 }}>
-        {(['input', 'pipeline', 'output'] as Tab[]).map(t => (
-          <button key={t} onClick={() => setTab(t)} style={{
-            flex: 1, padding: '12px 8px',
-            fontFamily: "'Karla', sans-serif", fontSize: 11, fontWeight: 600,
-            letterSpacing: '1.5px', textTransform: 'uppercase', textAlign: 'center',
-            cursor: 'pointer', border: 'none', background: 'transparent',
-            color: tab === t ? 'var(--text)' : 'var(--text-light)',
-            borderBottom: `2px solid ${tab === t ? 'var(--text)' : 'transparent'}`,
-            transition: 'all 0.2s',
-          }}>
-            {t}{t === 'output' && output ? ' ✓' : ''}
-          </button>
-        ))}
+      {/* Tab strip — sticky under header */}
+      <div className="sticky z-40 bg-paper/95 backdrop-blur border-b border-border" style={{ top: 'var(--header-h, 60px)' }}>
+        <div className="mx-auto max-w-3xl px-5 flex">
+          {(['input', 'pipeline', 'output'] as Tab[]).map(t => {
+            const active = tab === t;
+            return (
+              <button
+                key={t}
+                onClick={() => setTab(t)}
+                className={cn(
+                  'flex-1 py-3 text-[10px] font-mono uppercase tracking-[0.15em] transition-colors',
+                  'border-b-2',
+                  active
+                    ? 'border-foreground text-foreground'
+                    : 'border-transparent text-muted-foreground hover:text-foreground/70',
+                )}
+              >
+                {t}{t === 'output' && output ? ' ·' : ''}
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       {/* ── INPUT TAB ── */}
@@ -1369,25 +1370,18 @@ function HomeInner() {
             </div>
           </div>
 
-          {/* Run button */}
-          <button
+          {/* Run / stop \u2014 single CTA per docs/redesign-brief.md */}
+          <Button
             onClick={isRunning ? handleStop : handleRun}
             disabled={!isRunning && !inputText.trim()}
-            style={{
-              width: '100%', padding: '16px 24px',
-              border: `1px solid ${isRunning ? 'var(--border)' : !inputText.trim() ? 'var(--border)' : 'var(--text)'}`,
-              borderRadius: 'var(--radius)',
-              background: isRunning ? 'var(--bg-white)' : !inputText.trim() ? 'var(--bg-warm)' : 'var(--text)',
-              color: isRunning ? 'var(--text-muted)' : !inputText.trim() ? 'var(--text-light)' : 'var(--bg-white)',
-              fontFamily: '"Cormorant Garamond", serif', fontSize: 20, fontWeight: 400,
-              letterSpacing: '0.3px', cursor: (!isRunning && !inputText.trim()) ? 'not-allowed' : 'pointer',
-              transition: 'all 0.2s',
-            }}
+            variant={isRunning ? 'outline' : 'default'}
+            size="lg"
+            className="w-full font-serif text-lg"
           >
             {isRunning
-              ? `${isBookMode ? `Processing section ${currentChapterIdx + 1} of ${bookChapters.length}` : 'Translation in progress'}\u2026 (click to stop)`
-              : `Begin ${isBookMode ? 'Book ' : ''}Pipeline`}
-          </button>
+              ? `${isBookMode ? `Processing chapter ${currentChapterIdx + 1} of ${bookChapters.length}` : 'Translation in progress'} \u2014 click to stop`
+              : `Begin ${isBookMode ? 'book ' : ''}translation`}
+          </Button>
         </div>
       )}
 

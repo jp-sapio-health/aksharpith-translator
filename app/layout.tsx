@@ -1,6 +1,17 @@
 import type { Metadata } from 'next';
+import { Cormorant_Garamond } from 'next/font/google';
+import { GeistSans } from 'geist/font/sans';
+import { GeistMono } from 'geist/font/mono';
 import './globals.css';
 import { AuthProvider } from '../lib/auth-context';
+
+const cormorant = Cormorant_Garamond({
+  subsets: ['latin'],
+  weight: ['400', '500', '600'],
+  style: ['normal', 'italic'],
+  variable: '--font-cormorant',
+  display: 'swap',
+});
 
 export const metadata: Metadata = {
   title: 'Aksharpith Translation Pipeline',
@@ -13,17 +24,14 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
+    <html
+      lang="en"
+      className={`${GeistSans.variable} ${GeistMono.variable} ${cormorant.variable}`}
+    >
       <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
-        <link
-          href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400&family=Karla:ital,wght@0,300;0,400;0,500;0,600;1,300;1,400&display=swap"
-          rel="stylesheet"
-        />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
       </head>
-      <body>
+      <body className="font-sans bg-background text-foreground antialiased">
         <AuthProvider>{children}</AuthProvider>
       </body>
     </html>

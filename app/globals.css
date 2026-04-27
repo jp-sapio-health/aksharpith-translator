@@ -1,61 +1,129 @@
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* ─── Theme tokens ───────────────────────────────────────────────────────── */
+/* Mono / taupe palette per docs/redesign-brief.md.
+   base-nova / neutral OKLCH from shadcn, gently warmed for paper aesthetic. */
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-paper: var(--paper);
+  --color-paper-warm: var(--paper-warm);
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-ink-light: var(--ink-light);
+
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --font-serif: var(--font-cormorant);
+
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+}
 
 :root {
-  --bg: #faf9f7;
-  --bg-white: #ffffff;
-  --bg-warm: #f5f3f0;
-  --border: #e8e5e0;
-  --border-light: #f0ede8;
-  --text: #1a1a1a;
-  --text-body: #3d3d3d;
-  --text-muted: #6b6b6b;
-  --text-light: #999;
-  --green: #2d6a4f;
-  --green-bg: #f0f7f4;
-  --green-border: #d4e8dc;
-  --amber: #92640a;
-  --amber-bg: #fdf8ef;
-  --amber-border: #eedcb5;
-  --red: #9b2c2c;
-  --red-bg: #fdf2f2;
-  --red-border: #f0cdcd;
-  --radius: 8px;
+  /* Paper / ink — warm taupe-cream */
+  --paper: oklch(0.98 0.005 80);          /* warm off-white */
+  --paper-warm: oklch(0.965 0.008 80);    /* slightly more warmth */
+  --ink: oklch(0.21 0.012 60);            /* deep taupe */
+  --ink-muted: oklch(0.45 0.012 60);
+  --ink-light: oklch(0.62 0.010 60);
+
+  /* shadcn neutral tokens, mapped to paper/ink */
+  --background: var(--paper);
+  --foreground: var(--ink);
+  --card: var(--paper);
+  --card-foreground: var(--ink);
+  --popover: var(--paper);
+  --popover-foreground: var(--ink);
+  --primary: var(--ink);
+  --primary-foreground: var(--paper);
+  --secondary: var(--paper-warm);
+  --secondary-foreground: var(--ink);
+  --muted: var(--paper-warm);
+  --muted-foreground: var(--ink-muted);
+  --accent: var(--paper-warm);
+  --accent-foreground: var(--ink);
+  --destructive: oklch(0.55 0.18 25);
+  --border: oklch(0.90 0.010 80);
+  --input: oklch(0.90 0.010 80);
+  --ring: oklch(0.62 0.010 60);
+
+  --radius: 0.5rem;
+
+  /* ── Backwards-compat aliases ──────────────────────────────────────────── */
+  /* Map the old CSS variable names (used inline throughout pre-redesign
+     pages) onto the new tokens. Lets the migration ship in stages without
+     breaking unmigrated surfaces. Remove once every inline-style reference
+     to --bg, --text, etc. is gone. */
+  --bg: var(--paper);
+  --bg-white: var(--paper);
+  --bg-warm: var(--paper-warm);
+  --border-light: oklch(0.94 0.008 80);
+  --text: var(--ink);
+  --text-body: var(--ink);
+  --text-muted: var(--ink-muted);
+  --text-light: var(--ink-light);
+  --green: oklch(0.42 0.07 145);
+  --green-bg: oklch(0.96 0.020 145);
+  --green-border: oklch(0.88 0.030 145);
+  --amber: oklch(0.55 0.10 75);
+  --amber-bg: oklch(0.96 0.025 75);
+  --amber-border: oklch(0.88 0.040 75);
+  --red: var(--destructive);
+  --red-bg: oklch(0.96 0.020 25);
+  --red-border: oklch(0.88 0.040 25);
 }
 
-html, body {
-  min-height: 100vh;
-  background: var(--bg);
-  color: var(--text-body);
-  font-family: 'Karla', sans-serif;
-  font-weight: 300;
-  font-size: 15px;
-  line-height: 1.75;
-  -webkit-font-smoothing: antialiased;
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  html, body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans), system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  ::-webkit-scrollbar-track { background: transparent; }
 }
 
-::-webkit-scrollbar { width: 4px; }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
-
-textarea, input {
-  font-family: 'Cormorant Garamond', serif;
-  -webkit-appearance: none;
+/* Reading view typography — Cormorant Garamond for sacred body */
+.reading-prose {
+  font-family: var(--font-serif), Georgia, serif;
+  font-size: 1.0625rem;
+  line-height: 1.65;
+  color: var(--ink);
+  letter-spacing: 0.005em;
 }
 
-@keyframes spin { to { transform: rotate(360deg); } }
-.spinning { display: inline-block; animation: spin 1.4s linear infinite; }
-
-@keyframes fadein {
-  from { opacity: 0; transform: translateY(5px); }
-  to   { opacity: 1; transform: none; }
-}
-.fadein { animation: fadein 0.3s ease forwards; }
-
-@keyframes bar-fill {
-  from { width: 0%; }
-}
-
-@keyframes indeterminate {
-  0%   { transform: translateX(-100%); }
-  100% { transform: translateX(400%); }
-}
-.indeterminate-bar { animation: indeterminate 1.5s ease-in-out infinite; }
+.reading-prose p { margin-bottom: 1.1em; }
+.reading-prose p:last-child { margin-bottom: 0; }
+.reading-prose em { font-style: italic; color: var(--ink-muted); }

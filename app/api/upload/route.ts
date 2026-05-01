@@ -78,7 +78,12 @@ function callClaudeExtractOnce(
       res.on('data', c => { raw += c; });
       res.on('end', () => {
         if (!res.statusCode || res.statusCode >= 400) {
-          reject(new Error(`Claude ${res.statusCode ?? 0}: ${raw.slice(0, 300)}`));
+          // Log full upstream detail server-side for debugging; do not echo it
+          // to clients (Sapio SECURITY: never expose internal structure).
+          console.error(`[upload] Anthropic ${res.statusCode ?? 0}: ${raw.slice(0, 500)}`);
+          const err = new Error('Claude extraction failed') as Error & { statusCode?: number };
+          err.statusCode = res.statusCode ?? 0;
+          reject(err);
           return;
         }
         try {
@@ -331,38 +336,66 @@ export async function POST(req: NextRequest) {
 
       // If local extraction failed or garbled, use Claude OCR
       if (!extracted) {
-        // Estimate tokens from file size (~150 tokens/KB)
-        const estimatedTokens = Math.round(buf.length / 1024 * 150);
+        // Resolve page count: pdf-parse may have left pdfPages=0 on image-only PDFs.
+        if (!pdfPages) {
+          try { pdfPages = (await PDFDocument.load(buf)).getPageCount(); } catch { /* leave at 0 */ }
+        }
 
-        if (estimatedTokens <= 150_000 && buf.length <= MAX_CLAUDE_PDF) {
-          // Small enough for a single Haiku call on Vercel
+        // Anthropic PDF support has a 200k-token context window. Empirically a
+        // BAPS Gujarati page is ~2-3k tokens at full visual fidelity, so 30
+        // pages per call leaves headroom. Larger PDFs are split and joined.
+        const PAGES_PER_CALL = 30;
+
+        if (buf.length <= MAX_CLAUDE_PDF && pdfPages > 0 && pdfPages <= PAGES_PER_CALL) {
+          // Small enough for a single Haiku call.
           extracted = await callClaudeExtractOnce(apiKey, buf.toString('base64'), 'application/pdf', PDF_PROMPT);
-        } else {
-          // Too large for Vercel — save file to disk, local worker picks it up
-          const { writeFileSync, mkdirSync } = await import('node:fs');
-          const { resolve: resolvePath } = await import('node:path');
-          const extractionId = `extract_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-          const extractDir = resolvePath(process.cwd(), 'extractions');
-          try { mkdirSync(extractDir, { recursive: true }); } catch { /* exists */ }
-          const filePath = resolvePath(extractDir, `${extractionId}.pdf`);
-          writeFileSync(filePath, buf);
-
-          await adminDb.collection('extractions').doc(extractionId).set({
-            status: 'pending',
-            filename: file.name,
-            filePath,
-            mediaType: 'application/pdf',
-            pages: pdfPages,
-            fileSizeBytes: buf.length,
-            createdAt: new Date().toISOString(),
-          });
+        } else if (buf.length <= MAX_CLAUDE_PDF && pdfPages > PAGES_PER_CALL) {
+          // Multi-chunk: split into N-page slices, OCR each via Haiku, join.
+          const pdfChunks = await splitPdfIntoChunks(buf, PAGES_PER_CALL);
+          const texts: string[] = [];
+          for (const chunkBuf of pdfChunks) {
+            texts.push(await callClaudeExtractOnce(apiKey, chunkBuf.toString('base64'), 'application/pdf', PDF_PROMPT));
+          }
+          extracted = texts.join('\n\n');
+        } else if (process.env.VERCEL === '1') {
+          // > 32 MB on Vercel — local-worker path is unreachable here (Vercel
+          // FS is read-only outside /tmp and the worker watches a different
+          // machine). Surface a clean JSON error instead of crashing.
           return Response.json({
-            extractionId,
-            status: 'extracting_locally',
-            filename: file.name,
-            pages: pdfPages,
-            message: `PDF is ${pdfPages} pages — sending to local worker for extraction (no timeout limits)`,
-          });
+            error: `PDF is ${(buf.length / 1024 / 1024).toFixed(1)} MB / ${pdfPages || '?'} pages, over the ${(MAX_CLAUDE_PDF / 1024 / 1024).toFixed(0)} MB serverless limit. Please run the app locally (npm run dev) and re-upload.`,
+          }, { status: 413 });
+        } else {
+          // > 32 MB on a local machine — write to disk for the local worker.
+          try {
+            const { writeFileSync, mkdirSync } = await import('node:fs');
+            const { resolve: resolvePath } = await import('node:path');
+            const extractionId = `extract_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+            const extractDir = resolvePath(process.cwd(), 'extractions');
+            mkdirSync(extractDir, { recursive: true });
+            const filePath = resolvePath(extractDir, `${extractionId}.pdf`);
+            writeFileSync(filePath, buf);
+
+            await adminDb.collection('extractions').doc(extractionId).set({
+              status: 'pending',
+              filename: file.name,
+              filePath,
+              mediaType: 'application/pdf',
+              pages: pdfPages,
+              fileSizeBytes: buf.length,
+              createdAt: new Date().toISOString(),
+            });
+            return Response.json({
+              extractionId,
+              status: 'extracting_locally',
+              filename: file.name,
+              pages: pdfPages,
+              message: `PDF is ${pdfPages} pages — sending to local worker for extraction (no timeout limits)`,
+            });
+          } catch {
+            return Response.json({
+              error: 'Could not stage this PDF for the local worker. Please retry, or use a smaller PDF.',
+            }, { status: 500 });
+          }
         }
       }
     }

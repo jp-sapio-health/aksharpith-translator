@@ -68,20 +68,14 @@ const POLL_INTERVAL = 5_000;
 const SDK_MAX_RETRIES = 2;
 const SDK_RETRY_DELAY_MS = 5_000;
 
-// Optional admin-only telemetry (mirrors lib/pipeline.ts). When 'true', the
-// worker fires off a non-blocking reviewer call per chunk and stores the
-// score under translations/<id>.adminTelemetry. Never reaches the user view.
-const ENABLE_REVIEWER_TELEMETRY = (env.ENABLE_REVIEWER_TELEMETRY ?? process.env.ENABLE_REVIEWER_TELEMETRY) === 'true';
-
 // ── Load rules + prompts via tsx ─────────────────────────────────────────────
-// The translator/smoother system prompts are built from the TypeScript rules
-// module. The reviewer prompt is loaded only when telemetry is enabled.
+// Translator and smoother system prompts built from the TypeScript rules module.
 
 let rulesModule;
 try {
   const { execSync } = await import('node:child_process');
   // Single-line eval to keep tsx/esbuild from interpreting \n as a TS source escape.
-  const rulesScript = `import { buildTranslatorSystem, buildReviewerSystem, buildSmootherSystem } from '${ROOT}/lib/rules/index.ts'; console.log(JSON.stringify({ TRANSLATOR_SYSTEM: buildTranslatorSystem(), SMOOTHER_SYSTEM: buildSmootherSystem(), REVIEWER_SYSTEM: buildReviewerSystem() }));`;
+  const rulesScript = `import { buildTranslatorSystem, buildSmootherSystem } from '${ROOT}/lib/rules/index.ts'; console.log(JSON.stringify({ TRANSLATOR_SYSTEM: buildTranslatorSystem(), SMOOTHER_SYSTEM: buildSmootherSystem() }));`;
   const result = execSync(`npx tsx -e ${JSON.stringify(rulesScript)}`, {
     encoding: 'utf-8', cwd: ROOT, maxBuffer: 5 * 1024 * 1024,
     env: { ...process.env, ...env },
@@ -93,11 +87,10 @@ try {
   rulesModule = {
     TRANSLATOR_SYSTEM: 'You are a trustee of the parampara. Translate Gujarati to English with fidelity to BAPS Swaminarayan editorial rules. Output ONLY <translation>...</translation><flags>...</flags>.',
     SMOOTHER_SYSTEM: 'I am working on improving a translation of a non-fiction historical biography for better readability. Keep direct quotes, transliterated verses and proper nouns verbatim. Output ONLY <smoothed>...</smoothed>.',
-    REVIEWER_SYSTEM: 'You are a translation reviewer. Return JSON with totalScore, revised, certifiable.',
   };
 }
 
-const { TRANSLATOR_SYSTEM, SMOOTHER_SYSTEM, REVIEWER_SYSTEM } = rulesModule;
+const { TRANSLATOR_SYSTEM, SMOOTHER_SYSTEM } = rulesModule;
 
 // ── Claude Agent SDK ─────────────────────────────────────────────────────────
 // Auth is via CLAUDE_CODE_OAUTH_TOKEN env var (loaded from .env.local at top of
@@ -298,40 +291,27 @@ async function smootherAgent(text) {
   return parseSmootherXml(raw);
 }
 
-/**
- * @deprecated Admin-only telemetry. Off by default. Tolerant JSON parser
- * because the reviewer's score is best-effort and never blocks the user path.
- */
-async function reviewerAgent(original, translation) {
-  const fallback = { score: -1, certifiable: false };
-  let raw;
-  try {
-    raw = await callClaude({
-      model: SONNET, max_tokens: 16000,
-      system: REVIEWER_SYSTEM,
-      messages: [{ role: 'user', content: `GUJARATI SOURCE:\n${original}\n\nTRANSLATION TO AUDIT:\n${translation}` }],
-    });
-  } catch (err) {
-    console.error('  [telemetry] Reviewer API call failed:', err.message);
-    return fallback;
+// Defensive: if the smoother stripped macrons (ā) from verse transliterations,
+// restore the original line from the translator output. Mirrors the
+// preserveMacrons helper in lib/pipeline.ts.
+function preserveMacrons(translatorText, smootherText) {
+  const MACRON = /[Āā]/g;
+  const stripMacron = (s) => s.replace(/Ā/g, 'A').replace(/ā/g, 'a');
+  const tCount = (translatorText.match(MACRON) ?? []).length;
+  const sCount = (smootherText.match(MACRON) ?? []).length;
+  if (tCount === 0 || sCount >= tCount) return { text: smootherText, restored: 0 };
+  const verseLines = translatorText.split('\n').filter(l => /[Āā]/.test(l));
+  let patched = smootherText;
+  let restored = 0;
+  for (const verseLine of verseLines) {
+    if (patched.includes(verseLine)) continue;
+    const stripped = stripMacron(verseLine);
+    if (patched.includes(stripped)) {
+      patched = patched.replace(stripped, verseLine);
+      restored += (verseLine.match(MACRON) ?? []).length;
+    }
   }
-  const stripped = raw.replace(/^```(?:json)?\s*/gm, '').replace(/\s*```$/gm, '');
-  const match = stripped.match(/\{[\s\S]*\}/);
-  if (!match) return fallback;
-  const jsonStr = match[0];
-  try {
-    const p = JSON.parse(jsonStr);
-    const rawScore = typeof p.totalScore === 'number' ? p.totalScore : (typeof p.score === 'number' ? p.score : -1);
-    return {
-      score: Math.max(-1, Math.min(100, rawScore)),
-      certifiable: typeof p.certifiable === 'boolean' ? p.certifiable : false,
-    };
-  } catch {
-    let score = -1;
-    const tsm = jsonStr.match(/"totalScore"\s*:\s*(\d+)/);
-    if (tsm) score = Math.max(0, Math.min(100, parseInt(tsm[1], 10)));
-    return { score, certifiable: false };
-  }
+  return { text: patched, restored };
 }
 
 function assemblerAgent(smoothedChunks) {
@@ -390,7 +370,7 @@ try {
   if (testResult.trim() === 'ok') {
     // We can use tsx to run the enforcer. But since it's synchronous and we'd need
     // to shell out for each call, let's keep the inline version for performance.
-    // The full rules are baked into the translator/reviewer system prompts anyway.
+    // The full rules are baked into the translator/smoother system prompts anyway.
     console.log('[worker] Full rules enforcer available via tsx');
   }
 } catch { /* inline version will be used */ }
@@ -438,11 +418,10 @@ async function runJobPipeline(jobId, jobData) {
 
   await reportProgress({ progress: { currentStage: 'translator', stages: { chunker: { status: 'done', chunkCount: chunks.length } }, chunks: chunkProgressArr } });
 
-  // ── Stages 2-3: Pipelined per-chunk (translator → smoother)
+  // ── Stages 2-3: Pipelined per-chunk (translator → enforcer → smoother → enforcer)
   const translations = new Array(chunks.length).fill('');
   const chunkFlags = Array.from({ length: chunks.length }, () => []);
   const smoothedChunks = new Array(chunks.length).fill('');
-  const reviewerTelemetry = []; // optional admin-only
   const chunkDataForStorage = [];
 
   let translateDone = 0, smoothDone = 0;
@@ -476,18 +455,6 @@ async function runJobPipeline(jobId, jobData) {
       : `${translatorOut.flags.length} self-flag${translatorOut.flags.length === 1 ? '' : 's'}`;
     await reportProgress({ progress: { currentStage: 'translator', commentary: `Translated${chunkLabel} — ${translations[i].split(/\s+/).filter(Boolean).length} words output, ${flagSummary}`, stages: stageSnapshot(), chunks: chunkProgressArr } });
 
-    // Optional admin-only telemetry — fire-and-forget.
-    if (ENABLE_REVIEWER_TELEMETRY) {
-      reviewerTelemetry.push(
-        reviewerAgent(chunks[i], translations[i])
-          .then(r => ({ index: i, score: r.score, certifiable: r.certifiable }))
-          .catch(err => {
-            console.error(`  [telemetry] reviewer failed on chunk ${i}: ${err.message}`);
-            return { index: i, score: -1, certifiable: false };
-          }),
-      );
-    }
-
     // Smoother (XML output). Fall back to translator output on parser/model failure.
     await reportProgress({ progress: { currentStage: 'smoother', commentary: `Smoothing${chunkLabel} — preserving direct quotes, transliterated verses and proper nouns…`, stages: stageSnapshot(), chunks: chunkProgressArr } });
     console.log(`  [chunk ${i + 1}/${chunks.length}] Smoothing...`);
@@ -500,15 +467,26 @@ async function runJobPipeline(jobId, jobData) {
       smootherFallback = true;
       console.warn(`  [chunk ${i + 1}/${chunks.length}] Smoother fallback: ${err.message}`);
     }
+
+    // Defensive: restore any macrons the smoother stripped on verse lines.
+    const { text: macronSafe, restored: macronsRestored } = preserveMacrons(translations[i], smoothedText);
+    smoothedText = macronSafe;
+    if (macronsRestored > 0) {
+      const flag = `Smoother stripped ${macronsRestored} macron${macronsRestored === 1 ? '' : 's'} from verse transliteration${macronsRestored === 1 ? '' : 's'} — auto-restored from translator output.`;
+      chunkFlags[i] = [...chunkFlags[i], flag];
+      console.warn(`  [chunk ${i + 1}/${chunks.length}] ${flag}`);
+    }
+
     smoothedChunks[i] = rulesEnforcerAgent(smoothedText).text;
     smoothDone++;
-    await reportProgress({ progress: { currentStage: 'smoother', commentary: `Smoothed${chunkLabel}${smootherFallback ? ' (fell back to translator output)' : ''}`, stages: stageSnapshot(), chunks: chunkProgressArr } });
+    chunkProgressArr[i] = { ...chunkProgressArr[i], flags: chunkFlags[i] };
+    await reportProgress({ progress: { currentStage: 'smoother', commentary: `Smoothed${chunkLabel}${smootherFallback ? ' (fell back to translator output)' : ''}${macronsRestored > 0 ? ` — restored ${macronsRestored} macron${macronsRestored === 1 ? '' : 's'}` : ''}`, stages: stageSnapshot(), chunks: chunkProgressArr } });
 
     chunkDataForStorage.push({
       index: i,
       originalGujarati: chunks[i],
       translation: smoothedChunks[i],
-      flags: translatorOut.flags,
+      flags: chunkFlags[i],
     });
   }
 
@@ -540,19 +518,7 @@ async function runJobPipeline(jobId, jobData) {
   const finalWords = finalText.trim().split(/\s+/).filter(Boolean).length;
   const totalFlags = chunkFlags.reduce((s, f) => s + f.length, 0);
 
-  // Resolve admin-only telemetry (already kicked off; this just awaits).
-  let adminTelemetry;
-  if (ENABLE_REVIEWER_TELEMETRY && reviewerTelemetry.length > 0) {
-    const settled = await Promise.all(reviewerTelemetry);
-    const valid = settled.filter(s => s.score >= 0);
-    adminTelemetry = {
-      reviewerScore: valid.length > 0 ? Math.round(valid.reduce((s, r) => s + r.score, 0) / valid.length) : 0,
-      perChunk: settled.sort((a, b) => a.index - b.index),
-    };
-  }
-
-  // Save translation document. Reviewer telemetry stored on the doc; user-facing
-  // payload (below) does not include reviewer-derived fields.
+  // Save translation document.
   let translationId = '';
   try {
     const docRef = await db.collection('translations').add({
@@ -564,7 +530,6 @@ async function runJobPipeline(jobId, jobData) {
       inputPreview: text.slice(0, 300),
       chunkData: chunkDataForStorage.sort((a, b) => a.index - b.index),
       flagsCount: totalFlags,
-      adminTelemetry: adminTelemetry ?? null,
       createdAt: new Date().toISOString(),
     });
     translationId = docRef.id;

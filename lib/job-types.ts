@@ -21,12 +21,6 @@ export interface StageProgress {
   total?: number;
   chunkCount?: number;
   totalFixes?: number;
-  // Reviewer-derived fields (kept optional for one PR cycle of revert safety;
-  // the translator/smoother critical path no longer populates them).
-  certCount?: number;
-  avgScore?: number;
-  rechecked?: number;
-  flaggedChunks?: number;
 }
 
 export interface ChunkProgress {
@@ -35,28 +29,6 @@ export interface ChunkProgress {
   translation?: string;
   /** Translator self-flags — surfaced in the user view. */
   flags?: string[];
-  // ─── Deprecated (admin-only) ──────────────────────────────────────────
-  // Reviewer fields are populated only when ENABLE_REVIEWER_TELEMETRY=true
-  // and only on the Firestore document — the user-facing response strips
-  // them. Kept optional for revert safety.
-  /** @deprecated reviewer score 0–100 — admin-only when enabled */
-  score?: number;
-  /** @deprecated reviewer certification — admin-only when enabled */
-  certifiable?: boolean;
-  /** @deprecated reviewer categories — admin-only when enabled */
-  categories?: Array<{ id: string; weight: number; score: number; deductions: string[]; pass: boolean }>;
-  /** @deprecated reviewer pitfalls — admin-only when enabled */
-  pitfalls?: string[];
-  /** @deprecated reviewer issues — admin-only when enabled */
-  issues?: string[];
-  /** @deprecated reviewer score history — admin-only when enabled */
-  scoreHistory?: number[];
-  /** @deprecated reviewer round count — admin-only when enabled */
-  reviewRound?: number;
-  /** @deprecated reviewer running flag — admin-only when enabled */
-  reviewing?: boolean;
-  /** @deprecated smoother fallback flag (replaced by inline progress commentary) */
-  flagged?: boolean;
 }
 
 export interface JobProgress {
@@ -64,15 +36,6 @@ export interface JobProgress {
   commentary?: string;
   stages: Record<string, StageProgress>;
   chunks: ChunkProgress[];
-}
-
-export interface ReviewerSummaryData {
-  avgScore: number;
-  certifiedCount: number;
-  totalChunks: number;
-  categories: Array<{ id: string; weight: number; avgScore: number }>;
-  totalDeductions: number;
-  topIssues: string[];
 }
 
 export interface JobResult {
@@ -83,11 +46,6 @@ export interface JobResult {
   /** Total translator self-flags across all chunks. Surfaced in the user view. */
   flagsCount: number;
   translationId: string;
-  // ─── Deprecated (admin-only) ──────────────────────────────────────────
-  /** @deprecated reviewer-derived avg score; populated only when telemetry is on, never in user response */
-  avgScore?: number;
-  /** @deprecated reviewer-derived summary; populated only when telemetry is on, never in user response */
-  reviewerSummary?: ReviewerSummaryData;
 }
 
 export interface JobDocument {

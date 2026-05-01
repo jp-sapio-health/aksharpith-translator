@@ -10,12 +10,8 @@ interface ChunkData {
   index: number;
   originalGujarati: string;
   translation: string;
-  /** Translator self-flags — surfaced in user view (PR 4 contract). */
+  /** Translator self-flags — the canonical chunk-level signal. */
   flags?: string[];
-  /** Reviewer telemetry — admin only when present, not displayed in user view. */
-  reviewerScore?: number;
-  certifiable?: boolean;
-  reviewerCategories?: Array<{ id: string; score: number; weight: number }>;
 }
 
 interface TranslationDoc {

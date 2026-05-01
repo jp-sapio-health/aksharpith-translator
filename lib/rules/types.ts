@@ -36,8 +36,6 @@ export interface TrainingDataEntry {
   chunkIndex: number;
   originalGujarati: string;
   pipelineTranslation: string;
-  reviewerScore: number;
-  reviewerCategories: Array<{ id: string; score: number; weight: number }>;
   comments: ReviewComment[];
   createdAt: string;
 }

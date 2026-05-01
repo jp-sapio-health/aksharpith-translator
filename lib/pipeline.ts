@@ -8,7 +8,6 @@ import {
   DATE_FORMAT_RULES,
   DIACRITICS_MAP,
   buildTranslatorSystem,
-  buildReviewerSystem,
   buildSmootherSystem,
 } from './rules';
 import type { RulesCorrection } from './rules';
@@ -22,17 +21,10 @@ const BATCH  = 5;
 const API_TIMEOUT_MS    = 90_000;
 const MAX_RETRIES       = 1;
 
-// Optional admin-only telemetry: when ENABLE_REVIEWER_TELEMETRY=true, the
-// pipeline asynchronously runs the deprecated reviewer once per chunk and
-// stores the score under translations/<id>.adminTelemetry.reviewerScore. The
-// result is never returned to user-facing endpoints.
-const ENABLE_REVIEWER_TELEMETRY = process.env.ENABLE_REVIEWER_TELEMETRY === 'true';
-
 // ─── Build prompts once ──────────────────────────────────────────────────────
 
 const TRANSLATOR_SYSTEM = buildTranslatorSystem();
 const SMOOTHER_SYSTEM   = buildSmootherSystem();
-const REVIEWER_SYSTEM   = buildReviewerSystem();
 
 // ─── Anthropic API helper ────────────────────────────────────────────────────
 
@@ -183,9 +175,9 @@ function deterministicChunk(text: string): string[] {
 // ─── Agent functions ────────────────────────────────────────────────────────
 
 /**
- * Translator agent — returns the sadhu's-chain output: an English translation
- * plus translator self-flags for any low-confidence span. XML output contract,
- * strict parser. Throws ParserError if the model returns malformed XML.
+ * Translator agent — sadhu-approved Prompts 1+2+3. Returns an English
+ * translation plus translator self-flags for any low-confidence span.
+ * XML output, strict parser. Throws ParserError on malformed XML.
  */
 async function translatorAgent(
   apiKey: string, chunk: string, chunkIndex: number, totalChunks: number,
@@ -200,7 +192,6 @@ async function translatorAgent(
 
 /**
  * Smoother agent — Prompt 4 verbatim. Strict <smoothed> XML output. The
- * earlier wordDiffRatio guardrail ("preserve 90% of words") is gone; the
  * "What to never change" list inside the prompt is the safeguard. If the
  * model returns malformed XML, ParserError is thrown and the chunk falls
  * back to the unsmoothed translator output (handled by the caller).
@@ -214,88 +205,47 @@ async function smootherAgent(apiKey: string, text: string): Promise<{ smoothed: 
   return parseSmoother(raw);
 }
 
-/**
- * @deprecated Not on the critical path. Kept for one PR cycle as revert
- * insurance and as the source for optional admin-only telemetry. Do NOT call
- * from any user-facing code path. Its output never reaches the user response.
- */
-interface ReviewResult {
-  categories: Array<{ id: string; weight: number; score: number; deductions: string[]; pass: boolean }>;
-  pitfalls: string[];
-  issues: string[];
-  score: number;
-  revised: string;
-  certifiable: boolean;
-}
+// ─── Macron preservation guard ──────────────────────────────────────────────
+//
+// The smoother is an LLM and may "consistency-clean" verse transliterations
+// like "Ātmā jāgo re" into the prose form "Atma jago re", which is data
+// loss. The translator emits ā characters per the prompt; the smoother is
+// instructed to preserve them but cannot be trusted unilaterally.
+//
+// preserveMacrons() is a deterministic safety net:
+// 1. For each line in the translator output containing "ā", check whether
+//    the smoother dropped or stripped it.
+// 2. If a translator verse-line has an obvious macron-stripped twin in the
+//    smoother output, replace the twin with the original.
+// 3. Returns the patched smoother text plus a count of restorations.
 
-/** @deprecated — see ReviewResult. Admin-telemetry only. */
-async function reviewerAgent(apiKey: string, original: string, translation: string): Promise<ReviewResult> {
-  const fallback: ReviewResult = { categories: [], pitfalls: [], issues: [], score: 50, revised: translation, certifiable: false };
-  let raw: string;
-  try {
-    raw = await callClaude({
-      model: SONNET, max_tokens: 16000, apiKey,
-      system: REVIEWER_SYSTEM,
-      messages: [{ role: 'user', content: `GUJARATI SOURCE:\n${original}\n\nTRANSLATION TO AUDIT:\n${translation}` }],
-    });
-  } catch (err) {
-    console.error('Reviewer API call failed:', err instanceof Error ? err.message : err);
-    return fallback;
+export function preserveMacrons(translatorText: string, smootherText: string): { text: string; restored: number } {
+  // Match both lowercase ā (U+0101) and uppercase Ā (U+0100).
+  const MACRON = /[Āā]/g;
+  const stripMacron = (s: string) => s.replace(/Ā/g, 'A').replace(/ā/g, 'a');
+
+  const translatorMacronCount = (translatorText.match(MACRON) ?? []).length;
+  const smootherMacronCount = (smootherText.match(MACRON) ?? []).length;
+  if (translatorMacronCount === 0) return { text: smootherText, restored: 0 };
+  if (smootherMacronCount >= translatorMacronCount) return { text: smootherText, restored: 0 };
+
+  // Build the candidate set: translator lines containing a macron. These are
+  // the verse transliterations we must protect.
+  const translatorLines = translatorText.split('\n');
+  const verseLines = translatorLines.filter(l => /[Āā]/.test(l));
+
+  let patched = smootherText;
+  let restored = 0;
+  for (const verseLine of verseLines) {
+    if (patched.includes(verseLine)) continue;        // already preserved verbatim
+    const stripped = stripMacron(verseLine);
+    if (patched.includes(stripped)) {
+      // Smoother stripped the macrons on this exact line — restore it.
+      patched = patched.replace(stripped, verseLine);
+      restored += (verseLine.match(MACRON) ?? []).length;
+    }
   }
-
-  const stripped = raw.replace(/^```(?:json)?\s*/gm, '').replace(/\s*```$/gm, '');
-  const match = stripped.match(/\{[\s\S]*\}/);
-  if (!match) {
-    console.error('Reviewer returned no JSON object. Raw (first 500):', raw.slice(0, 500));
-    return fallback;
-  }
-
-  const jsonStr = match[0];
-
-  try {
-    const p = JSON.parse(jsonStr);
-    const rawScore = typeof p.totalScore === 'number' ? p.totalScore : (typeof p.score === 'number' ? p.score : 50);
-    const cats: ReviewResult['categories'] = Array.isArray(p.categories)
-      ? p.categories.map((c: Record<string, unknown>) => ({
-          id: typeof c.id === 'string' ? c.id : '',
-          weight: typeof c.weight === 'number' ? c.weight : 0,
-          score: typeof c.score === 'number' ? Math.max(0, c.score as number) : 0,
-          deductions: Array.isArray(c.deductions) ? (c.deductions as unknown[]).filter((s: unknown) => typeof s === 'string') as string[] : (Array.isArray(c.issues) ? (c.issues as unknown[]).filter((s: unknown) => typeof s === 'string') as string[] : []),
-          pass: typeof c.pass === 'boolean' ? c.pass : true,
-        }))
-      : [];
-    return {
-      categories: cats,
-      pitfalls: Array.isArray(p.pitfalls) ? p.pitfalls.filter((s: unknown) => typeof s === 'string') : [],
-      issues: Array.isArray(p.issues) ? p.issues.filter((s: unknown) => typeof s === 'string') : [],
-      score: Math.max(0, Math.min(100, rawScore)),
-      revised: typeof p.revised === 'string' && p.revised.trim() ? p.revised.trim() : translation,
-      certifiable: typeof p.certifiable === 'boolean' ? p.certifiable : false,
-    };
-  } catch {
-    console.error('Reviewer JSON parse failed. Raw length:', raw.length);
-    let score = 50;
-    const tsm = jsonStr.match(/"totalScore"\s*:\s*(\d+)/);
-    if (tsm) score = Math.max(0, Math.min(100, parseInt(tsm[1], 10)));
-    else { const sm = jsonStr.match(/"score"\s*:\s*(\d+)/); if (sm) score = Math.max(0, Math.min(100, parseInt(sm[1], 10))); }
-
-    let revised = translation;
-    const rm = jsonStr.match(/"revised"\s*:\s*"([\s\S]*?)(?:"\s*[,}]|$)/);
-    if (rm && rm[1].trim().length > 50) { try { revised = JSON.parse(`"${rm[1]}"`); } catch { revised = translation; } }
-
-    let certifiable = false;
-    const cm = jsonStr.match(/"certifiable"\s*:\s*(true|false)/);
-    if (cm) certifiable = cm[1] === 'true';
-
-    let categories: ReviewResult['categories'] = [];
-    try { const m = jsonStr.match(/"categories"\s*:\s*\[[\s\S]*?\]/); if (m) categories = JSON.parse(m[0].replace(/^"categories"\s*:\s*/, '')); } catch { /* ignore */ }
-    let pitfalls: string[] = [];
-    try { const m = jsonStr.match(/"pitfalls"\s*:\s*\[[\s\S]*?\]/); if (m) pitfalls = JSON.parse(m[0].replace(/^"pitfalls"\s*:\s*/, '')).filter((s: unknown) => typeof s === 'string'); } catch { /* ignore */ }
-    let issues: string[] = [];
-    try { const m = jsonStr.match(/"issues"\s*:\s*\[[\s\S]*?\]/); if (m) issues = JSON.parse(m[0].replace(/^"issues"\s*:\s*/, '')).filter((s: unknown) => typeof s === 'string'); } catch { /* ignore */ }
-
-    return { categories, pitfalls, issues, score, revised, certifiable };
-  }
+  return { text: patched, restored };
 }
 
 function assemblerAgent(smoothedChunks: string[]): string {
@@ -373,13 +323,12 @@ export function rulesEnforcerAgent(text: string): { text: string; corrections: R
 
 // ─── Main Pipeline ──────────────────────────────────────────────────────────
 //
-// Sadhu-approved chain (PR 3):
-//   chunker → translator → smoother → enforcer → assembler
+// Sadhu-approved chain:
+//   chunker → translator → enforcer → smoother → enforcer → assembler → enforcer
 //
-// Reviewer is no longer on the critical path. When ENABLE_REVIEWER_TELEMETRY
-// is 'true', each chunk fires off a non-blocking reviewer call whose result is
-// written to Firestore under translations/<id>.adminTelemetry.reviewerScore
-// for the /admin dashboard. It never reaches the user-facing response.
+// Two LLM calls per chunk. Three deterministic enforcer passes. No reviewer.
+// No quality scoring. Validation is human side-by-side judgement, not a
+// model-generated number.
 
 export async function runPipeline(
   input: PipelineInput,
@@ -406,13 +355,10 @@ export async function runPipeline(
 
   await reportProgress({ progress: { currentStage: 'translator', stages: { chunker: { status: 'done', chunkCount: chunks.length } }, chunks: chunkProgressArr } });
 
-  // ── Stages 2-3: Pipelined per-chunk (translator → smoother) ────────────
+  // ── Stages 2-3: Pipelined per-chunk (translator → enforcer → smoother → enforcer) ─
   const translations: string[] = new Array(chunks.length).fill('');
   const chunkFlags: string[][] = Array.from({ length: chunks.length }, () => []);
   const smoothedChunks: string[] = new Array(chunks.length).fill('');
-
-  // Optional admin-only telemetry — fire-and-forget, settled at the end.
-  const reviewerTelemetry: Array<Promise<{ index: number; score: number; certifiable: boolean }>> = [];
 
   const chunkDataForStorage: Array<{
     index: number; originalGujarati: string; translation: string; flags: string[];
@@ -435,6 +381,8 @@ export async function runPipeline(
     // Translate (XML output: <translation> + <flags>)
     await reportProgress({ progress: { currentStage: 'translator', commentary: `Translating${chunkLabel} (${srcWords} words) with full Aksharpith style context…`, stages: stageSnapshot(), chunks: chunkProgressArr } });
     const translatorOut = await translatorAgent(apiKey!, chunks[i], i, chunks.length);
+    // Enforce rules on translator output before passing to smoother — the
+    // smoother sees rules-clean input so it cannot reintroduce banned terms.
     translations[i] = rulesEnforcerAgent(translatorOut.translation).text;
     chunkFlags[i] = translatorOut.flags;
     translateDone++;
@@ -447,18 +395,6 @@ export async function runPipeline(
       ? 'no self-flags'
       : `${translatorOut.flags.length} self-flag${translatorOut.flags.length === 1 ? '' : 's'}`;
     await reportProgress({ progress: { currentStage: 'translator', commentary: `Translated${chunkLabel} — ${translations[i].split(/\s+/).length} words output, ${flagSummary}`, stages: stageSnapshot(), chunks: chunkProgressArr } });
-
-    // Optional admin-only reviewer telemetry — never blocks user-facing path.
-    if (ENABLE_REVIEWER_TELEMETRY) {
-      reviewerTelemetry.push(
-        reviewerAgent(apiKey!, chunks[i], translations[i])
-          .then(r => ({ index: i, score: r.score, certifiable: r.certifiable }))
-          .catch(err => {
-            console.error(`[telemetry] reviewer failed for chunk ${i}:`, err instanceof Error ? err.message : err);
-            return { index: i, score: -1, certifiable: false };
-          }),
-      );
-    }
 
     // Smoother (XML output: <smoothed>). On parser/model failure, fall back
     // to the unsmoothed translator output rather than corrupting the chunk.
@@ -473,15 +409,29 @@ export async function runPipeline(
       const message = err instanceof ParserError ? err.message : (err instanceof Error ? err.message : 'unknown');
       console.warn(`[pipeline] Smoother fallback on chunk ${i}: ${message}`);
     }
+
+    // Defensive: restore any macrons the smoother stripped on verse lines.
+    const { text: macronSafe, restored: macronsRestored } = preserveMacrons(translations[i], smoothedText);
+    smoothedText = macronSafe;
+    if (macronsRestored > 0) {
+      const flag = `Smoother stripped ${macronsRestored} macron${macronsRestored === 1 ? '' : 's'} from verse transliteration${macronsRestored === 1 ? '' : 's'} — auto-restored from translator output.`;
+      chunkFlags[i] = [...chunkFlags[i], flag];
+      console.warn(`[pipeline] chunk ${i}: ${flag}`);
+    }
+
     smoothedChunks[i] = rulesEnforcerAgent(smoothedText).text;
     smoothDone++;
-    await reportProgress({ progress: { currentStage: 'smoother', commentary: `Smoothed${chunkLabel}${smootherFallback ? ' (fell back to translator output)' : ''}`, stages: stageSnapshot(), chunks: chunkProgressArr } });
+    chunkProgressArr[i] = {
+      ...chunkProgressArr[i],
+      flags: chunkFlags[i],
+    };
+    await reportProgress({ progress: { currentStage: 'smoother', commentary: `Smoothed${chunkLabel}${smootherFallback ? ' (fell back to translator output)' : ''}${macronsRestored > 0 ? ` — restored ${macronsRestored} macron${macronsRestored === 1 ? '' : 's'}` : ''}`, stages: stageSnapshot(), chunks: chunkProgressArr } });
 
     chunkDataForStorage.push({
       index: i,
       originalGujarati: chunks[i],
       translation: smoothedChunks[i],
-      flags: translatorOut.flags,
+      flags: chunkFlags[i],
     });
   }
 
@@ -517,19 +467,7 @@ export async function runPipeline(
   const finalWords = finalText.trim().split(/\s+/).filter(Boolean).length;
   const totalFlags = chunkFlags.reduce((s, f) => s + f.length, 0);
 
-  // Resolve admin-only telemetry. Already kicked off; this just awaits.
-  let adminTelemetry: { reviewerScore: number; perChunk: Array<{ index: number; score: number; certifiable: boolean }> } | undefined;
-  if (ENABLE_REVIEWER_TELEMETRY && reviewerTelemetry.length > 0) {
-    const settled = await Promise.all(reviewerTelemetry);
-    const valid = settled.filter(s => s.score >= 0);
-    adminTelemetry = {
-      reviewerScore: valid.length > 0 ? Math.round(valid.reduce((s, r) => s + r.score, 0) / valid.length) : 0,
-      perChunk: settled.sort((a, b) => a.index - b.index),
-    };
-  }
-
-  // Persist translation. Reviewer telemetry, when present, is on the doc —
-  // the user-facing response and the user-polled job document do NOT carry it.
+  // Persist translation. Two LLM calls, three enforcer passes, no scoring.
   let translationId = '';
   try {
     const docRef = await adminDb.collection('translations').add({
@@ -541,7 +479,6 @@ export async function runPipeline(
       inputPreview: text.slice(0, 300),
       chunkData: chunkDataForStorage.sort((a, b) => a.index - b.index),
       flagsCount: totalFlags,
-      adminTelemetry: adminTelemetry ?? null,
       createdAt: new Date().toISOString(),
     });
     translationId = docRef.id;
@@ -549,7 +486,7 @@ export async function runPipeline(
     console.error('Firestore save error:', err);
   }
 
-  // Report completion. Result carries flags + final text only — no scores.
+  // Report completion.
   await reportProgress({
     status: 'completed',
     completedAt: new Date().toISOString(),

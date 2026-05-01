@@ -1,5 +1,4 @@
 import { KEY_GLOSSARY } from './glossary';
-import { PROTECTED_TERMS } from './protected-terms';
 import { formatHouseRulesForPrompt } from './house-rules';
 import { FORBIDDEN_VOCABULARY } from './forbidden-vocab';
 
@@ -31,7 +30,20 @@ Doctrinal vocabulary: Akshardham (not "divine abode"), Purush (not "personage"),
 
 Historical integrity: Era-correct names — "Bombay Province" not "Mumbai" in pre-1995 contexts. Exact village spellings: Chansad, Dhuliya, Bhadrod, Bamangam, Dangara, Piplana, Choksi.
 
-Diacritics: The ONLY diacritical mark permitted anywhere is ā (a-macron), and only when directly quoting poetic or canonical verses. Never use ī/ū/ṇ/ṭ/ṣ/ś/ṛ/ṅ/ḍ/ñ or any other special character. In prose write plain Roman: prapti, bhakti, anand, murti.
+Diacritics — CRITICAL RULE:
+The ONLY diacritical mark permitted is ā (a-macron, U+0101) and its capital Ā (U+0100).
+Every transliterated Sanskrit/Gujarati verse line MUST use ā wherever the source has a long-a vowel. Emitting plain "a" instead of "ā" in a verse transliteration is a hard translation error.
+Never use ī/ū/ṇ/ṭ/ṣ/ś/ṛ/ṅ/ḍ/ñ or any other special character anywhere.
+In ordinary prose write plain Roman: prapti, bhakti, anand, murti.
+
+VERSE TRANSLITERATION EXAMPLES — copy this exact pattern for any verse line you encounter:
+  • “Premē pragatyā re sūraj sahajānand” → render as: “Premē pragatyā re sūraj sahajānand” (love manifests as the sun, Sahajānand)
+    NOTE: in this example only ā is permitted; if the prompt example shows other diacritics they are rendered for illustration only — do NOT copy them. The cleaned form is: “Preme pragatyā re suraj Sahajānand”.
+  • “Ātmā jāgo re” → keep ā exactly: “Ātmā jāgo re” (O soul, awaken)
+  • “Pārabrahma sākshāt rūpa” → cleaned form (only ā permitted): “Pārabrahma sākshat rupa” (the visible form of Parabrahma)
+  • “Akshardhām svāminārāyana” → cleaned form: “Akshardhām Svāminārāyana” (Akshardham, Lord Swaminarayan)
+
+Pattern in plain language: every Sanskrit/Gujarati long-a is rendered ā in transliterated verse lines. Other long vowels (ī, ū) are written as plain i, u. Retroflex/sibilant marks (ṇ, ṭ, ṣ, ś) are dropped to plain n, t, sh, sh.
 
 === AKSHARPITH HOUSE-STYLE GUIDE (all 10 sections) ===
 
@@ -70,7 +82,8 @@ ${KEY_GLOSSARY}
 
 - Cross-reference every term with the Master Glossary above.
 - Poetic / verse lines: include the Roman transliteration FIRST, then the English meaning in parentheses. Both are mandatory. Wrap transliterations in curly double quotes (“ ”). Italicise transliterated verses and book titles.
-- Diacritics: macrons ī/ū never appear in prose. Use ā only inside canonical or poetic verse quotation.
+- Verse transliterations MUST use ā for every long-a vowel. Example: a verse line is rendered “Ātmā jāgo re” NOT “Atma jago re”. Plain "a" in a verse transliteration where the source has long-a is a hard error. Self-check every verse line you produce: if the source contained a long-a sound, the output MUST contain ā at the corresponding position.
+- Diacritics: macrons ī/ū never appear anywhere. ā is REQUIRED inside every verse transliteration that has a long-a sound in the source — preserve every ā character verbatim, never substitute plain "a". In ordinary prose, write plain Roman without macrons.
 - Tone: dignified, measured, reverent. Eliminate rhetorical padding (indeed, truly, remarkably, clearly).
 - Speaker authority: keep first-person quotes verbatim; do not soften into indirect speech.
 - Preserve exact dates in British format ("3 April 1781", not "April 3, 1781"), exact timestamps, all numbers.
@@ -111,12 +124,14 @@ What to never change:
 - Direct quotes from named historical figures, scholars, and writers — leave these word for word
 - Transliterated verses and their translations — reproduce these in full, never truncate with ellipsis
 - All proper nouns, Sanskrit/Gujarati terms, and names
+- EVERY diacritic character. Specifically, the macron-a "ā" (U+0101) MUST be preserved verbatim wherever it appears. Do NOT replace "ā" with plain "a", even if the surrounding prose is plain Roman. The macron carries phonetic and devotional meaning. Stripping it is a hard error.
 
 Formatting and style:
 - Use en-dash ( – ) throughout; never em-dash (—)
 - Commas and semi-colons may be used where appropriate
 - British English with Oxford -ize spellings (e.g. recognize, organize, realize)
 - Italicise transliterated verses and book titles
+- The macron-a "ā" inside transliterations is part of the word. British-English styling applies to the prose AROUND transliterations, never to the characters within them.
 
 === OUTPUT CONTRACT (STRICT) ===
 
@@ -127,52 +142,3 @@ The polished English text. Plain text inside the tag. No JSON. No markdown fence
 </smoothed>`;
 }
 
-/**
- * @deprecated The reviewer is no longer on the critical path. The sadhu's
- * approved chain is translator → smoother → enforcer; the reviewer
- * was an engineer-added LLM-grading-LLM step that was removed in PR 3
- * because (a) Jay does not trust the percentage score and (b) JSON output
- * was unreliable. This function is kept for one PR cycle as revert insurance
- * and as the source for optional admin-only telemetry. Do not use in any
- * user-facing code path. Removal scheduled for the next pipeline PR.
- */
-export function buildReviewerSystem(): string {
-  return `You are a BAPS translation auditor and senior style reviewer for Aksharpith. You are reviewing text produced by ANOTHER translator — you did NOT write this text. Perform a combined certification and style audit in a single pass.
-
-IMPORTANT: You are an INDEPENDENT auditor. Score objectively against the weighted rubric below. Do not inflate scores.
-
-ULTIMATE GOVERNING PRINCIPLE: Every revision must preserve Truth, Dignity, Clarity, Devotional sanctity, and Historical precision.
-
-WEIGHTED SCORING RUBRIC (6 categories, 100 points total):
-1. FIDELITY (30 pts) — Nothing added/omitted/paraphrased.
-2. TERMINOLOGY (25 pts) — mandir, Swami, Akshardham, Shriji Maharaj, Bhagwan Swaminarayan, devotee, satsang, seva, shastra, mukhpath, arti, vichran, austerities, successor, brahmisthiti, dhotiyas, Piplana, nishkami vartaman, sacred history, Naran’da.
-3. VERSE HANDLING (15 pts) — Roman transliteration first, then English meaning. Only ā permitted.
-4. STYLE & REGISTER (15 pts) — UK English Oxford. Curly quotes. Spaced en dashes. No modern management or psychology terms.
-5. HISTORICAL PRECISION (10 pts) — Era-correct names, exact dates in British format, exact place spellings.
-6. COMPLETENESS (5 pts) — All paragraphs translated.
-
-FORBIDDEN VOCABULARY: ${FORBIDDEN_LIST}, story (for sacred events).
-
-Set "certifiable" to true ONLY if total >= 97 AND zero critical violations.
-
-Return ONLY valid JSON (no fences):
-{"categories": [{"id": "FIDELITY", "weight": 30, "score": 28, "deductions": ["Minor: ..."], "pass": true}], "totalScore": 98, "certifiable": true, "revised": "..."}`;
-}
-
-/**
- * @deprecated Assembler step is now deterministic concatenation in
- * pipeline.ts:assemblerAgent. This LLM-based assembler was dropped in
- * earlier PRs but the function is retained for one cycle as revert insurance.
- */
-export function buildAssemblerSystem(protectedTerms: string = PROTECTED_TERMS): string {
-  return `You are a trustee of tradition (parampara) assembling a multi-chunk translation into a single publication-ready document.
-
-STRUCTURAL OPERATIONS ONLY:
-- Remove all chunk markers, separators, and numbering
-- If two adjacent chunks overlap, deduplicate
-- Preserve chapter headings exactly as they appear
-
-DO NOT replace these terms: ${protectedTerms}
-
-Output ONLY the final document.`;
-}

@@ -1,5 +1,4 @@
 import { KEY_GLOSSARY } from './glossary';
-import { PROTECTED_TERMS } from './protected-terms';
 import { formatHouseRulesForPrompt } from './house-rules';
 import { FORBIDDEN_VOCABULARY } from './forbidden-vocab';
 
@@ -127,52 +126,3 @@ The polished English text. Plain text inside the tag. No JSON. No markdown fence
 </smoothed>`;
 }
 
-/**
- * @deprecated The reviewer is no longer on the critical path. The sadhu's
- * approved chain is translator → smoother → enforcer; the reviewer
- * was an engineer-added LLM-grading-LLM step that was removed in PR 3
- * because (a) Jay does not trust the percentage score and (b) JSON output
- * was unreliable. This function is kept for one PR cycle as revert insurance
- * and as the source for optional admin-only telemetry. Do not use in any
- * user-facing code path. Removal scheduled for the next pipeline PR.
- */
-export function buildReviewerSystem(): string {
-  return `You are a BAPS translation auditor and senior style reviewer for Aksharpith. You are reviewing text produced by ANOTHER translator — you did NOT write this text. Perform a combined certification and style audit in a single pass.
-
-IMPORTANT: You are an INDEPENDENT auditor. Score objectively against the weighted rubric below. Do not inflate scores.
-
-ULTIMATE GOVERNING PRINCIPLE: Every revision must preserve Truth, Dignity, Clarity, Devotional sanctity, and Historical precision.
-
-WEIGHTED SCORING RUBRIC (6 categories, 100 points total):
-1. FIDELITY (30 pts) — Nothing added/omitted/paraphrased.
-2. TERMINOLOGY (25 pts) — mandir, Swami, Akshardham, Shriji Maharaj, Bhagwan Swaminarayan, devotee, satsang, seva, shastra, mukhpath, arti, vichran, austerities, successor, brahmisthiti, dhotiyas, Piplana, nishkami vartaman, sacred history, Naran’da.
-3. VERSE HANDLING (15 pts) — Roman transliteration first, then English meaning. Only ā permitted.
-4. STYLE & REGISTER (15 pts) — UK English Oxford. Curly quotes. Spaced en dashes. No modern management or psychology terms.
-5. HISTORICAL PRECISION (10 pts) — Era-correct names, exact dates in British format, exact place spellings.
-6. COMPLETENESS (5 pts) — All paragraphs translated.
-
-FORBIDDEN VOCABULARY: ${FORBIDDEN_LIST}, story (for sacred events).
-
-Set "certifiable" to true ONLY if total >= 97 AND zero critical violations.
-
-Return ONLY valid JSON (no fences):
-{"categories": [{"id": "FIDELITY", "weight": 30, "score": 28, "deductions": ["Minor: ..."], "pass": true}], "totalScore": 98, "certifiable": true, "revised": "..."}`;
-}
-
-/**
- * @deprecated Assembler step is now deterministic concatenation in
- * pipeline.ts:assemblerAgent. This LLM-based assembler was dropped in
- * earlier PRs but the function is retained for one cycle as revert insurance.
- */
-export function buildAssemblerSystem(protectedTerms: string = PROTECTED_TERMS): string {
-  return `You are a trustee of tradition (parampara) assembling a multi-chunk translation into a single publication-ready document.
-
-STRUCTURAL OPERATIONS ONLY:
-- Remove all chunk markers, separators, and numbering
-- If two adjacent chunks overlap, deduplicate
-- Preserve chapter headings exactly as they appear
-
-DO NOT replace these terms: ${protectedTerms}
-
-Output ONLY the final document.`;
-}

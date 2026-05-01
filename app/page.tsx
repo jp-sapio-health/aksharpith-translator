@@ -30,9 +30,8 @@ interface EnforcerCorrection {
   from: string; to: string; count: number;
 }
 
-// PR 3 / PR 4 contract: the user view consumes translator self-flags, not
-// reviewer scores. Reviewer-derived fields are stripped at the API boundary
-// and only available in /admin via /api/admin/translate/[jobId].
+// User view consumes translator self-flags. The pipeline produces no
+// reviewer-derived fields after the pare-down.
 interface ChunkData {
   index: number; original: string;
   translation?: string;
@@ -47,7 +46,7 @@ interface ChapterResult {
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
-// User-facing pipeline view (5 stages). The reviewer is admin-only telemetry.
+// Pipeline view — five stages, no reviewer.
 const INITIAL_STAGES: StageState[] = [
   { id: 'chunker',    num: '01', label: 'Chunker',    tagline: 'Splits text at paragraph and verse boundaries into ≤500-word segments', status: 'waiting', msg: '', progress: null },
   { id: 'translator', num: '02', label: 'Translator', tagline: 'Gujarati→English with full Aksharpith style context (Sonnet)', status: 'waiting', msg: '', progress: null },
@@ -549,7 +548,7 @@ function HomeInner() {
   const [enforcerCorrections, setEnforcerCorrections] = useState<EnforcerCorrection[]>([]);
   const [enforcerTotalFixes, setEnforcerTotalFixes] = useState(0);
   const [mainMenuOpen, setMainMenuOpen] = useState(false);
-  // Reviewer telemetry is admin-only; the user view has no reviewerSummary state.
+  // No reviewer state — the pipeline produces flags + corrections only.
   const [rulesExpanded, setRulesExpanded] = useState(false);
   const [outputExpanded, setOutputExpanded] = useState(false);
   const [translationId, setTranslationId] = useState<string | null>(null);
@@ -585,7 +584,7 @@ function HomeInner() {
         const res = await fetch('/api/history', { headers: { Authorization: `Bearer ${token}` } });
         if (!res.ok) return;
         const data = await res.json();
-        const translations = data.translations as Array<{ id: string; output: string; avgScore: number; outputWordCount: number; chapterTitle: string | null; bookTitle: string | null; bookId: string | null }>;
+        const translations = data.translations as Array<{ id: string; output: string; outputWordCount: number; chapterTitle: string | null; bookTitle: string | null; bookId: string | null }>;
         if (!translations) return;
 
         const bookId = searchParams.get('book');
@@ -681,8 +680,8 @@ function HomeInner() {
     }
 
     // Update chunk cards from poll data. The user-facing API only returns
-    // index, original, translation, and flags; reviewer-derived fields
-    // (score, certifiable, categories, deductions) are stripped at the
+    // index, original, translation, and flags. The pipeline no longer
+    // produces score/categories/deductions fields after the pare-down at the
     // /api/translate/[jobId] boundary and only surface in /admin.
     if (pollChunks && pollChunks.length > 0) {
       for (const c of pollChunks) {
@@ -1445,7 +1444,7 @@ function HomeInner() {
                 </div>
               </div>
 
-              {/* Quality summary below document — corrections only; reviewer
+              {/* Quality summary below document — corrections only. No
                   metrics are admin-only and live at /admin */}
               <QualitySummary
                 corrections={enforcerCorrections}

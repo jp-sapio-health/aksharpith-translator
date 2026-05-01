@@ -46,7 +46,7 @@ export async function POST(req: NextRequest) {
       inputPreview: translationDoc?.inputPreview ?? null,
       inputWordCount: translationDoc?.inputWordCount ?? null,
       outputWordCount: translationDoc?.outputWordCount ?? null,
-      avgScore: translationDoc?.avgScore ?? null,
+      flagsCount: translationDoc?.flagsCount ?? null,
       chapterTitle: translationDoc?.chapterTitle ?? null,
       output: text,
       reviews,
@@ -74,7 +74,7 @@ export async function POST(req: NextRequest) {
   paragraphs.push(new Paragraph({
     children: [
       new TextRun({
-        text: `Aksharpith Translation Pipeline | Score: ${translationDoc?.avgScore ?? 'N/A'}% | ${new Date().toLocaleDateString('en-GB')}`,
+        text: `Aksharpith Translation Pipeline | ${new Date().toLocaleDateString('en-GB')}`,
         size: 18, color: '888888', italics: true,
       }),
     ],

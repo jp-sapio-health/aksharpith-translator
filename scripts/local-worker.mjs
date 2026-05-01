@@ -291,6 +291,29 @@ async function smootherAgent(text) {
   return parseSmootherXml(raw);
 }
 
+// Defensive: if the smoother stripped macrons (ā) from verse transliterations,
+// restore the original line from the translator output. Mirrors the
+// preserveMacrons helper in lib/pipeline.ts.
+function preserveMacrons(translatorText, smootherText) {
+  const MACRON = /[Āā]/g;
+  const stripMacron = (s) => s.replace(/Ā/g, 'A').replace(/ā/g, 'a');
+  const tCount = (translatorText.match(MACRON) ?? []).length;
+  const sCount = (smootherText.match(MACRON) ?? []).length;
+  if (tCount === 0 || sCount >= tCount) return { text: smootherText, restored: 0 };
+  const verseLines = translatorText.split('\n').filter(l => /[Āā]/.test(l));
+  let patched = smootherText;
+  let restored = 0;
+  for (const verseLine of verseLines) {
+    if (patched.includes(verseLine)) continue;
+    const stripped = stripMacron(verseLine);
+    if (patched.includes(stripped)) {
+      patched = patched.replace(stripped, verseLine);
+      restored += (verseLine.match(MACRON) ?? []).length;
+    }
+  }
+  return { text: patched, restored };
+}
+
 function assemblerAgent(smoothedChunks) {
   if (smoothedChunks.length <= 1) return smoothedChunks[0] ?? '';
   const result = [];
@@ -444,15 +467,26 @@ async function runJobPipeline(jobId, jobData) {
       smootherFallback = true;
       console.warn(`  [chunk ${i + 1}/${chunks.length}] Smoother fallback: ${err.message}`);
     }
+
+    // Defensive: restore any macrons the smoother stripped on verse lines.
+    const { text: macronSafe, restored: macronsRestored } = preserveMacrons(translations[i], smoothedText);
+    smoothedText = macronSafe;
+    if (macronsRestored > 0) {
+      const flag = `Smoother stripped ${macronsRestored} macron${macronsRestored === 1 ? '' : 's'} from verse transliteration${macronsRestored === 1 ? '' : 's'} — auto-restored from translator output.`;
+      chunkFlags[i] = [...chunkFlags[i], flag];
+      console.warn(`  [chunk ${i + 1}/${chunks.length}] ${flag}`);
+    }
+
     smoothedChunks[i] = rulesEnforcerAgent(smoothedText).text;
     smoothDone++;
-    await reportProgress({ progress: { currentStage: 'smoother', commentary: `Smoothed${chunkLabel}${smootherFallback ? ' (fell back to translator output)' : ''}`, stages: stageSnapshot(), chunks: chunkProgressArr } });
+    chunkProgressArr[i] = { ...chunkProgressArr[i], flags: chunkFlags[i] };
+    await reportProgress({ progress: { currentStage: 'smoother', commentary: `Smoothed${chunkLabel}${smootherFallback ? ' (fell back to translator output)' : ''}${macronsRestored > 0 ? ` — restored ${macronsRestored} macron${macronsRestored === 1 ? '' : 's'}` : ''}`, stages: stageSnapshot(), chunks: chunkProgressArr } });
 
     chunkDataForStorage.push({
       index: i,
       originalGujarati: chunks[i],
       translation: smoothedChunks[i],
-      flags: translatorOut.flags,
+      flags: chunkFlags[i],
     });
   }
 

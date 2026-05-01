@@ -205,6 +205,49 @@ async function smootherAgent(apiKey: string, text: string): Promise<{ smoothed: 
   return parseSmoother(raw);
 }
 
+// ─── Macron preservation guard ──────────────────────────────────────────────
+//
+// The smoother is an LLM and may "consistency-clean" verse transliterations
+// like "Ātmā jāgo re" into the prose form "Atma jago re", which is data
+// loss. The translator emits ā characters per the prompt; the smoother is
+// instructed to preserve them but cannot be trusted unilaterally.
+//
+// preserveMacrons() is a deterministic safety net:
+// 1. For each line in the translator output containing "ā", check whether
+//    the smoother dropped or stripped it.
+// 2. If a translator verse-line has an obvious macron-stripped twin in the
+//    smoother output, replace the twin with the original.
+// 3. Returns the patched smoother text plus a count of restorations.
+
+export function preserveMacrons(translatorText: string, smootherText: string): { text: string; restored: number } {
+  // Match both lowercase ā (U+0101) and uppercase Ā (U+0100).
+  const MACRON = /[Āā]/g;
+  const stripMacron = (s: string) => s.replace(/Ā/g, 'A').replace(/ā/g, 'a');
+
+  const translatorMacronCount = (translatorText.match(MACRON) ?? []).length;
+  const smootherMacronCount = (smootherText.match(MACRON) ?? []).length;
+  if (translatorMacronCount === 0) return { text: smootherText, restored: 0 };
+  if (smootherMacronCount >= translatorMacronCount) return { text: smootherText, restored: 0 };
+
+  // Build the candidate set: translator lines containing a macron. These are
+  // the verse transliterations we must protect.
+  const translatorLines = translatorText.split('\n');
+  const verseLines = translatorLines.filter(l => /[Āā]/.test(l));
+
+  let patched = smootherText;
+  let restored = 0;
+  for (const verseLine of verseLines) {
+    if (patched.includes(verseLine)) continue;        // already preserved verbatim
+    const stripped = stripMacron(verseLine);
+    if (patched.includes(stripped)) {
+      // Smoother stripped the macrons on this exact line — restore it.
+      patched = patched.replace(stripped, verseLine);
+      restored += (verseLine.match(MACRON) ?? []).length;
+    }
+  }
+  return { text: patched, restored };
+}
+
 function assemblerAgent(smoothedChunks: string[]): string {
   if (smoothedChunks.length <= 1) return smoothedChunks[0] ?? '';
   const result: string[] = [];
@@ -366,15 +409,29 @@ export async function runPipeline(
       const message = err instanceof ParserError ? err.message : (err instanceof Error ? err.message : 'unknown');
       console.warn(`[pipeline] Smoother fallback on chunk ${i}: ${message}`);
     }
+
+    // Defensive: restore any macrons the smoother stripped on verse lines.
+    const { text: macronSafe, restored: macronsRestored } = preserveMacrons(translations[i], smoothedText);
+    smoothedText = macronSafe;
+    if (macronsRestored > 0) {
+      const flag = `Smoother stripped ${macronsRestored} macron${macronsRestored === 1 ? '' : 's'} from verse transliteration${macronsRestored === 1 ? '' : 's'} — auto-restored from translator output.`;
+      chunkFlags[i] = [...chunkFlags[i], flag];
+      console.warn(`[pipeline] chunk ${i}: ${flag}`);
+    }
+
     smoothedChunks[i] = rulesEnforcerAgent(smoothedText).text;
     smoothDone++;
-    await reportProgress({ progress: { currentStage: 'smoother', commentary: `Smoothed${chunkLabel}${smootherFallback ? ' (fell back to translator output)' : ''}`, stages: stageSnapshot(), chunks: chunkProgressArr } });
+    chunkProgressArr[i] = {
+      ...chunkProgressArr[i],
+      flags: chunkFlags[i],
+    };
+    await reportProgress({ progress: { currentStage: 'smoother', commentary: `Smoothed${chunkLabel}${smootherFallback ? ' (fell back to translator output)' : ''}${macronsRestored > 0 ? ` — restored ${macronsRestored} macron${macronsRestored === 1 ? '' : 's'}` : ''}`, stages: stageSnapshot(), chunks: chunkProgressArr } });
 
     chunkDataForStorage.push({
       index: i,
       originalGujarati: chunks[i],
       translation: smoothedChunks[i],
-      flags: translatorOut.flags,
+      flags: chunkFlags[i],
     });
   }
 

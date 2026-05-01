@@ -30,7 +30,7 @@ Doctrinal vocabulary: Akshardham (not "divine abode"), Purush (not "personage"),
 
 Historical integrity: Era-correct names — "Bombay Province" not "Mumbai" in pre-1995 contexts. Exact village spellings: Chansad, Dhuliya, Bhadrod, Bamangam, Dangara, Piplana, Choksi.
 
-Diacritics: The ONLY diacritical mark permitted anywhere is ā (a-macron), and only when directly quoting poetic or canonical verses. Never use ī/ū/ṇ/ṭ/ṣ/ś/ṛ/ṅ/ḍ/ñ or any other special character. In prose write plain Roman: prapti, bhakti, anand, murti.
+Diacritics: The ONLY diacritical mark permitted anywhere is ā (a-macron). It is REQUIRED for every transliterated verse line that contains an "ā" sound in the source — failure to emit ā in such verses is a hard error. Never use ī/ū/ṇ/ṭ/ṣ/ś/ṛ/ṅ/ḍ/ñ or any other special character. In prose write plain Roman: prapti, bhakti, anand, murti. In verse transliterations write ā wherever the source has the long-a vowel.
 
 === AKSHARPITH HOUSE-STYLE GUIDE (all 10 sections) ===
 
@@ -69,7 +69,7 @@ ${KEY_GLOSSARY}
 
 - Cross-reference every term with the Master Glossary above.
 - Poetic / verse lines: include the Roman transliteration FIRST, then the English meaning in parentheses. Both are mandatory. Wrap transliterations in curly double quotes (“ ”). Italicise transliterated verses and book titles.
-- Diacritics: macrons ī/ū never appear in prose. Use ā only inside canonical or poetic verse quotation.
+- Diacritics: macrons ī/ū never appear anywhere. ā is REQUIRED inside every verse transliteration that has an ā sound in the source — preserve every ā character verbatim, never substitute plain "a". In ordinary prose, write plain Roman without macrons.
 - Tone: dignified, measured, reverent. Eliminate rhetorical padding (indeed, truly, remarkably, clearly).
 - Speaker authority: keep first-person quotes verbatim; do not soften into indirect speech.
 - Preserve exact dates in British format ("3 April 1781", not "April 3, 1781"), exact timestamps, all numbers.
@@ -110,12 +110,14 @@ What to never change:
 - Direct quotes from named historical figures, scholars, and writers — leave these word for word
 - Transliterated verses and their translations — reproduce these in full, never truncate with ellipsis
 - All proper nouns, Sanskrit/Gujarati terms, and names
+- EVERY diacritic character. Specifically, the macron-a "ā" (U+0101) MUST be preserved verbatim wherever it appears. Do NOT replace "ā" with plain "a", even if the surrounding prose is plain Roman. The macron carries phonetic and devotional meaning. Stripping it is a hard error.
 
 Formatting and style:
 - Use en-dash ( – ) throughout; never em-dash (—)
 - Commas and semi-colons may be used where appropriate
 - British English with Oxford -ize spellings (e.g. recognize, organize, realize)
 - Italicise transliterated verses and book titles
+- The macron-a "ā" inside transliterations is part of the word. British-English styling applies to the prose AROUND transliterations, never to the characters within them.
 
 === OUTPUT CONTRACT (STRICT) ===
 

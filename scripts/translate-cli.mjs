@@ -81,9 +81,24 @@ const SONNET = 'claude-sonnet-4-20250514';
 const SDK_MAX_RETRIES = 2;
 const SDK_RETRY_DELAY_MS = 5_000;
 
-async function callClaudeOnce({ system, userPrompt }) {
+async function callClaudeOnce({ system, userPrompt, contentBlocks }) {
+  // Build the prompt: simple string for text-only, or AsyncIterable<SDKUserMessage>
+  // when we need to send a content array (e.g. PDF document block for vision OCR).
+  let prompt;
+  if (contentBlocks) {
+    const userMessage = {
+      type: 'user',
+      message: { role: 'user', content: contentBlocks },
+      parent_tool_use_id: null,
+      session_id: '',
+    };
+    prompt = (async function* () { yield userMessage; })();
+  } else {
+    prompt = userPrompt;
+  }
+
   const q = query({
-    prompt: userPrompt,
+    prompt,
     options: {
       systemPrompt: system,
       model: SONNET,
@@ -123,6 +138,46 @@ async function callClaude(opts) {
   throw lastErr;
 }
 
+// ── PDF vision OCR (for image-only PDFs) ────────────────────────────────────
+
+const PDF_OCR_PROMPT = `Extract ALL text from this PDF document exactly as written. Preserve:
+- Every paragraph (blank line between paragraphs)
+- All Gujarati Unicode text exactly as it appears
+- All numbers, dates, names, verses
+- Chapter/section headings (mark as "=== CHAPTER: <title> ===" on its own line)
+- Verse/kirtan lines on separate lines
+- Table content with structure
+
+Return ONLY the extracted text — no commentary, no notes, no preamble.`;
+
+const PAGES_PER_OCR_CHUNK = 30;
+
+async function splitPdfIntoChunks(buf, pagesPerChunk) {
+  const { PDFDocument } = await import('pdf-lib');
+  const srcDoc = await PDFDocument.load(buf);
+  const totalPages = srcDoc.getPageCount();
+  const chunks = [];
+  for (let start = 0; start < totalPages; start += pagesPerChunk) {
+    const end = Math.min(start + pagesPerChunk, totalPages);
+    const newDoc = await PDFDocument.create();
+    const pages = await newDoc.copyPages(srcDoc, Array.from({ length: end - start }, (_, i) => start + i));
+    for (const page of pages) newDoc.addPage(page);
+    chunks.push({ buf: Buffer.from(await newDoc.save()), startPage: start, endPage: end });
+  }
+  return { chunks, totalPages };
+}
+
+async function ocrPdfBuffer(pdfBuf) {
+  const base64 = pdfBuf.toString('base64');
+  return await callClaude({
+    system: 'You are an OCR engine. Extract text from PDF documents preserving all original formatting, language scripts (especially Gujarati), and structural markers.',
+    contentBlocks: [
+      { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } },
+      { type: 'text', text: PDF_OCR_PROMPT },
+    ],
+  });
+}
+
 // ── Extract text from input ─────────────────────────────────────────────────
 
 const ext = extname(absPath).toLowerCase();
@@ -139,14 +194,34 @@ if (ext === '.txt') {
     .replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#039;/g, "'")
     .replace(/\n{3,}/g, '\n\n').trim();
 } else if (ext === '.pdf') {
-  // Try local pdf-parse first; fall back is out of scope for the CLI.
-  const { default: pdfParse } = await import('pdf-parse');
   const buf = readFileSync(absPath);
-  text = (await pdfParse(buf)).text.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
-  const indic = (text.match(/[઀-૿ऀ-ॿ]/g) ?? []).length;
-  if (text.length < 50 || indic / text.length < 0.05) {
-    console.error('PDF appears to be image-only (no embedded Gujarati text). The local CLI does not yet handle vision OCR — convert the PDF to a text PDF first or supply .txt/.docx.');
-    process.exit(1);
+
+  // Step 1: try pdf-parse (fast, free, works for text-PDFs).
+  try {
+    const { default: pdfParse } = await import('pdf-parse');
+    const parsed = await pdfParse(buf);
+    const localText = parsed.text.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+    const indic = (localText.match(/[઀-૿ऀ-ॿ]/g) ?? []).length;
+    if (localText.length > 50 && indic / localText.length >= 0.05) {
+      text = localText;
+      console.log(`PDF text extracted via pdf-parse (${parsed.numpages} pages, no OCR needed)`);
+    }
+  } catch { /* fall through to OCR */ }
+
+  // Step 2: image-only PDF — Claude vision OCR via the SDK.
+  if (!text) {
+    console.log('PDF appears to be image-only — running Claude vision OCR via Claude Max plan…');
+    const { chunks: pdfChunks, totalPages } = await splitPdfIntoChunks(buf, PAGES_PER_OCR_CHUNK);
+    console.log(`OCR plan: ${totalPages} pages → ${pdfChunks.length} chunk(s) of ≤${PAGES_PER_OCR_CHUNK} pages each`);
+    const parts = [];
+    for (let i = 0; i < pdfChunks.length; i++) {
+      const { startPage, endPage } = pdfChunks[i];
+      process.stdout.write(`  OCR chunk ${i + 1}/${pdfChunks.length} (pages ${startPage + 1}-${endPage})… `);
+      const t = await ocrPdfBuffer(pdfChunks[i].buf);
+      parts.push(t);
+      process.stdout.write(`${t.split(/\s+/).filter(Boolean).length} words\n`);
+    }
+    text = parts.join('\n\n').trim();
   }
 } else {
   console.error(`Unsupported extension: ${ext}. Use .txt, .docx, or text-PDF.`);

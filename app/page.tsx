@@ -299,12 +299,18 @@ function FileUpload({ onExtracted, disabled, getToken }: { onExtracted: (text: s
     const safeName = file.name.replace(/[^\w.\- ]+/g, '_');
     const pathname = `uploads/${uid}/${Date.now()}_${safeName}`;
 
+    // The Blob SDK doesn't forward auth headers, so we pass the Firebase ID
+    // token through `clientPayload` and verify it on the server.
+    const firebaseToken = await getToken();
+    if (!firebaseToken) { setError('You must be signed in to upload'); setPhase('error'); return; }
+
     let blob;
     try {
       blob = await blobUpload(pathname, file, {
         access: 'public',
         handleUploadUrl: '/api/blob-token',
         contentType: file.type || 'application/octet-stream',
+        clientPayload: JSON.stringify({ firebaseToken }),
         onUploadProgress: ({ percentage }) => setUploadProgress(Math.round(percentage)),
       });
     } catch (err) {

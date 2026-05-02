@@ -4,8 +4,8 @@ import { useState, useRef, useCallback, useEffect, Suspense } from 'react';
 import { doc, onSnapshot } from 'firebase/firestore';
 import { useAuth } from '../lib/auth-context';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { getFirebaseDb, getFirebaseStorage } from '../lib/firebase';
-import { ref as storageRef, uploadBytesResumable } from 'firebase/storage';
+import { getFirebaseDb } from '../lib/firebase';
+import { upload as blobUpload } from '@vercel/blob/client';
 import OutputView from './components/OutputView';
 import DocumentRenderer from './components/DocumentRenderer';
 import ReviewPanel from './components/ReviewPanel';
@@ -297,18 +297,22 @@ function FileUpload({ onExtracted, disabled, getToken }: { onExtracted: (text: s
     if (!uid) { setError('You must be signed in to upload'); setPhase('error'); return; }
 
     const safeName = file.name.replace(/[^\w.\- ]+/g, '_');
-    const storagePath = `uploads/${uid}/${Date.now()}_${safeName}`;
-    const storage = getFirebaseStorage();
-    const ref = storageRef(storage, storagePath);
+    const pathname = `uploads/${uid}/${Date.now()}_${safeName}`;
 
-    const task = uploadBytesResumable(ref, file, { contentType: file.type || 'application/octet-stream' });
-    task.on('state_changed',
-      (snap) => setUploadProgress(Math.round(snap.bytesTransferred / snap.totalBytes * 100)),
-      (err) => { setError(`Storage upload failed: ${err.code ?? 'unknown'}`); setPhase('error'); },
-    );
-
-    try { await task; }
-    catch { return; /* error handler above already set state */ }
+    let blob;
+    try {
+      blob = await blobUpload(pathname, file, {
+        access: 'public',
+        handleUploadUrl: '/api/blob-token',
+        contentType: file.type || 'application/octet-stream',
+        onUploadProgress: ({ percentage }) => setUploadProgress(Math.round(percentage)),
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Upload failed';
+      setError(`Upload failed: ${msg}`);
+      setPhase('error');
+      return;
+    }
 
     setPhase('processing');
     const token = await getToken();
@@ -319,7 +323,7 @@ function FileUpload({ onExtracted, disabled, getToken }: { onExtracted: (text: s
           'Content-Type': 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ storagePath, filename: file.name }),
+        body: JSON.stringify({ blobUrl: blob.url, filename: file.name }),
       });
       const text = await res.text();
       void handleResponse(res.status, text, file.name);

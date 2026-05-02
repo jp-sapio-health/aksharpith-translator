@@ -4,8 +4,9 @@ import { PDFDocument } from 'pdf-lib';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const pdfParse = require('pdf-parse') as (buf: Buffer) => Promise<{ numpages: number; text: string }>;
 import { NextRequest } from 'next/server';
+import { del as blobDelete } from '@vercel/blob';
 import { verifyAuthToken } from '../../../lib/verify-auth';
-import { adminDb, adminStorage } from '../../../lib/firebase-admin';
+import { adminDb } from '../../../lib/firebase-admin';
 
 export const dynamic    = 'force-dynamic';
 export const maxDuration = 300;
@@ -275,31 +276,39 @@ export async function POST(req: NextRequest) {
 
     // Two intake paths:
     //  1. multipart/form-data — small files (≤4.5 MB Vercel body cap) sent inline.
-    //  2. application/json { storagePath, filename } — large files staged via
-    //     Firebase Storage by the client to bypass Vercel's body-size limit.
+    //  2. application/json { blobUrl, filename } — large files staged via
+    //     Vercel Blob by the client to bypass the body-size limit.
     const contentType = req.headers.get('content-type') ?? '';
     let buf: Buffer;
     let filename: string;
+    let blobUrlToCleanup: string | null = null;
 
     if (contentType.includes('application/json')) {
-      const body = await req.json().catch(() => null) as { storagePath?: string; filename?: string } | null;
-      if (!body?.storagePath || !body?.filename) {
-        return Response.json({ error: 'Missing storagePath or filename' }, { status: 400 });
+      const body = await req.json().catch(() => null) as { blobUrl?: string; filename?: string } | null;
+      if (!body?.blobUrl || !body?.filename) {
+        return Response.json({ error: 'Missing blobUrl or filename' }, { status: 400 });
       }
-      // Storage rules require the path to be uploads/{uid}/...; enforce the same
-      // constraint server-side so a forged token can only access its own folder.
-      const expectedPrefix = `uploads/${authUser.uid}/`;
-      if (!body.storagePath.startsWith(expectedPrefix)) {
-        return Response.json({ error: 'Forbidden storage path' }, { status: 403 });
+      // Defence-in-depth: reject any URL that isn't a Vercel Blob host. The
+      // client SDK only ever returns *.public.blob.vercel-storage.com URLs.
+      try {
+        const u = new URL(body.blobUrl);
+        if (!u.hostname.endsWith('.public.blob.vercel-storage.com')) {
+          return Response.json({ error: 'Invalid blob URL host' }, { status: 400 });
+        }
+      } catch {
+        return Response.json({ error: 'Invalid blob URL' }, { status: 400 });
       }
       try {
-        const [downloaded] = await adminStorage.bucket().file(body.storagePath).download();
-        buf = downloaded;
+        const res = await fetch(body.blobUrl);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const ab = await res.arrayBuffer();
+        buf = Buffer.from(ab);
       } catch (err) {
-        console.error('[upload] storage fetch failed:', err);
-        return Response.json({ error: 'Could not retrieve uploaded file from storage' }, { status: 502 });
+        console.error('[upload] blob fetch failed:', err);
+        return Response.json({ error: 'Could not retrieve uploaded file' }, { status: 502 });
       }
       filename = body.filename;
+      blobUrlToCleanup = body.blobUrl;
       if (buf.length > MAX_FILE_SIZE) {
         return Response.json({
           error: `File too large (${(buf.length / 1024 / 1024).toFixed(1)} MB). Maximum is 100 MB.`,
@@ -502,6 +511,13 @@ export async function POST(req: NextRequest) {
     const chapters  = detectChapters(extracted);
     const wordCount = extracted.trim().split(/\s+/).filter(Boolean).length;
 
+    // Successfully extracted — clean up the staged Blob so we don't leak
+    // storage. Failures here are non-fatal; just log.
+    if (blobUrlToCleanup) {
+      try { await blobDelete(blobUrlToCleanup); }
+      catch (err) { console.warn('[upload] blob cleanup failed:', err); }
+    }
+
     return Response.json({
       text:       extracted,
       filename,
@@ -513,6 +529,7 @@ export async function POST(req: NextRequest) {
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error('Upload error:', msg);
-    return Response.json({ error: msg }, { status: 500 });
+    // Don't expose error message to client — Sapio SECURITY (no internal detail).
+    return Response.json({ error: 'Upload failed. Please retry.' }, { status: 500 });
   }
 }

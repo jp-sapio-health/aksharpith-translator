@@ -5,7 +5,7 @@ import { PDFDocument } from 'pdf-lib';
 const pdfParse = require('pdf-parse') as (buf: Buffer) => Promise<{ numpages: number; text: string }>;
 import { NextRequest } from 'next/server';
 import { verifyAuthToken } from '../../../lib/verify-auth';
-import { adminDb } from '../../../lib/firebase-admin';
+import { adminDb, adminStorage } from '../../../lib/firebase-admin';
 
 export const dynamic    = 'force-dynamic';
 export const maxDuration = 300;
@@ -273,38 +273,77 @@ export async function POST(req: NextRequest) {
     const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
     if (!apiKey) return Response.json({ error: 'ANTHROPIC_API_KEY not set' }, { status: 500 });
 
-    const formData = await req.formData().catch(() => null);
-    if (!formData) return Response.json({ error: 'Invalid form data' }, { status: 400 });
+    // Two intake paths:
+    //  1. multipart/form-data — small files (≤4.5 MB Vercel body cap) sent inline.
+    //  2. application/json { storagePath, filename } — large files staged via
+    //     Firebase Storage by the client to bypass Vercel's body-size limit.
+    const contentType = req.headers.get('content-type') ?? '';
+    let buf: Buffer;
+    let filename: string;
 
-    const fileField = formData.get('file');
-    if (!fileField || typeof fileField === 'string' || !('arrayBuffer' in fileField)) {
-      return Response.json({ error: 'No file provided' }, { status: 400 });
+    if (contentType.includes('application/json')) {
+      const body = await req.json().catch(() => null) as { storagePath?: string; filename?: string } | null;
+      if (!body?.storagePath || !body?.filename) {
+        return Response.json({ error: 'Missing storagePath or filename' }, { status: 400 });
+      }
+      // Storage rules require the path to be uploads/{uid}/...; enforce the same
+      // constraint server-side so a forged token can only access its own folder.
+      const expectedPrefix = `uploads/${authUser.uid}/`;
+      if (!body.storagePath.startsWith(expectedPrefix)) {
+        return Response.json({ error: 'Forbidden storage path' }, { status: 403 });
+      }
+      try {
+        const [downloaded] = await adminStorage.bucket().file(body.storagePath).download();
+        buf = downloaded;
+      } catch (err) {
+        console.error('[upload] storage fetch failed:', err);
+        return Response.json({ error: 'Could not retrieve uploaded file from storage' }, { status: 502 });
+      }
+      filename = body.filename;
+      if (buf.length > MAX_FILE_SIZE) {
+        return Response.json({
+          error: `File too large (${(buf.length / 1024 / 1024).toFixed(1)} MB). Maximum is 100 MB.`,
+        }, { status: 400 });
+      }
+      if (buf.length === 0) {
+        return Response.json({ error: 'File is empty.' }, { status: 400 });
+      }
+    } else {
+      const formData = await req.formData().catch(() => null);
+      if (!formData) return Response.json({ error: 'Invalid form data' }, { status: 400 });
+
+      const fileField = formData.get('file');
+      if (!fileField || typeof fileField === 'string' || !('arrayBuffer' in fileField)) {
+        return Response.json({ error: 'No file provided' }, { status: 400 });
+      }
+      const file = fileField as File;
+      if (!file.name) return Response.json({ error: 'No file provided' }, { status: 400 });
+
+      if (file.size > MAX_FILE_SIZE) {
+        return Response.json({
+          error: `File too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Maximum is 100 MB.`,
+        }, { status: 400 });
+      }
+      if (file.size === 0) {
+        return Response.json({ error: 'File is empty.' }, { status: 400 });
+      }
+
+      try {
+        buf = Buffer.from(await file.arrayBuffer());
+      } catch {
+        return Response.json({ error: 'Could not read file. The upload may be corrupted.' }, { status: 400 });
+      }
+      filename = file.name;
     }
-    const file = fileField as File;
-    if (!file.name) return Response.json({ error: 'No file provided' }, { status: 400 });
 
-    // ── Size validation ─────────────────────────────────────────────
-    if (file.size > MAX_FILE_SIZE) {
-      return Response.json({
-        error: `File too large (${(file.size / 1024 / 1024).toFixed(1)} MB). Maximum is 100 MB.`,
-      }, { status: 400 });
-    }
-
-    if (file.size === 0) {
-      return Response.json({ error: 'File is empty.' }, { status: 400 });
-    }
-
-    const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
+    const ext = filename.split('.').pop()?.toLowerCase() ?? '';
     if (!ext) {
       return Response.json({ error: 'File has no extension. Supported formats: PDF, DOCX, DOC, TXT, PNG, JPG, WEBP, GIF' }, { status: 400 });
     }
 
-    let buf: Buffer;
-    try {
-      buf = Buffer.from(await file.arrayBuffer());
-    } catch {
-      return Response.json({ error: 'Could not read file. The upload may be corrupted.' }, { status: 400 });
-    }
+    // From here on the handler treats `buf` and `filename` uniformly regardless
+    // of intake path. The only remaining `file.size` / `file.name` references
+    // below need to be replaced with `buf.length` / `filename`.
 
     let extracted = '';
 
@@ -377,7 +416,7 @@ export async function POST(req: NextRequest) {
 
             await adminDb.collection('extractions').doc(extractionId).set({
               status: 'pending',
-              filename: file.name,
+              filename,
               filePath,
               mediaType: 'application/pdf',
               pages: pdfPages,
@@ -387,7 +426,7 @@ export async function POST(req: NextRequest) {
             return Response.json({
               extractionId,
               status: 'extracting_locally',
-              filename: file.name,
+              filename,
               pages: pdfPages,
               message: `PDF is ${pdfPages} pages — sending to local worker for extraction (no timeout limits)`,
             });
@@ -465,7 +504,7 @@ export async function POST(req: NextRequest) {
 
     return Response.json({
       text:       extracted,
-      filename:   file.name,
+      filename,
       wordCount,
       chapters:   chapters.length > 1 ? chapters : null,
       isBookMode: wordCount > 3000,

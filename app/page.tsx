@@ -4,7 +4,8 @@ import { useState, useRef, useCallback, useEffect, Suspense } from 'react';
 import { doc, onSnapshot } from 'firebase/firestore';
 import { useAuth } from '../lib/auth-context';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { getFirebaseDb } from '../lib/firebase';
+import { getFirebaseDb, getFirebaseStorage } from '../lib/firebase';
+import { ref as storageRef, uploadBytesResumable } from 'firebase/storage';
 import OutputView from './components/OutputView';
 import DocumentRenderer from './components/DocumentRenderer';
 import ReviewPanel from './components/ReviewPanel';
@@ -207,86 +208,125 @@ function FileUpload({ onExtracted, disabled, getToken }: { onExtracted: (text: s
     }
   }, [phase]);
 
+  // Vercel serverless rejects request bodies > 4.5 MB at the platform layer
+  // before the function can run. For larger files we upload directly to
+  // Firebase Storage and then call the route with a JSON pointer instead of
+  // multipart. The 4 MB threshold leaves headroom for multipart overhead.
+  const VERCEL_BODY_LIMIT = 4 * 1024 * 1024;
+
   const startUpload = async (file: File) => {
     setSelectedFile(file);
     setError(null);
     setPhase('uploading');
     setUploadProgress(0);
 
-    const token = await getToken();
+    if (file.size > VERCEL_BODY_LIMIT) {
+      await startUploadViaStorage(file);
+    } else {
+      startUploadViaMultipart(file);
+    }
+  };
+
+  const handleResponse = async (status: number, responseText: string, fallbackFilename: string) => {
+    let data: { error?: string; status?: string; extractionId?: string; text?: string; filename?: string; chapters?: Array<{ title: string; startLine: number }> | null } = {};
+    try { data = JSON.parse(responseText); }
+    catch { setError('Failed to parse server response'); setPhase('error'); return; }
+
+    if (status >= 400 || data.error) {
+      setError(data.error ?? `Upload failed (HTTP ${status})`);
+      setPhase('error');
+      return;
+    }
+
+    if (data.status === 'extracting_locally' && data.extractionId) {
+      setExtractionStep(1);
+      const tk = await getToken();
+      const extractionId = data.extractionId;
+      const filename = data.filename ?? fallbackFilename;
+      const pollInterval = setInterval(async () => {
+        try {
+          const res = await fetch(`/api/extract?id=${extractionId}`, {
+            headers: tk ? { Authorization: `Bearer ${tk}` } : {},
+          });
+          const poll = await res.json();
+          if (poll.progress) setExtractionStep(prev => Math.min(prev + 1, EXTRACTION_STEPS.length - 1));
+          if (poll.status === 'completed') {
+            clearInterval(pollInterval);
+            setPhase('done');
+            onExtracted(poll.text ?? '', filename, poll.chapters ?? null);
+          }
+          if (poll.status === 'failed') {
+            clearInterval(pollInterval);
+            setError(poll.error ?? 'Extraction failed');
+            setPhase('error');
+          }
+        } catch { /* keep polling */ }
+      }, 2000);
+      return;
+    }
+
+    setPhase('done');
+    onExtracted(data.text ?? '', data.filename ?? fallbackFilename, data.chapters ?? null);
+  };
+
+  const startUploadViaMultipart = (file: File) => {
     const fd = new FormData();
     fd.append('file', file);
-
     const xhr = new XMLHttpRequest();
     xhrRef.current = xhr;
 
     xhr.upload.addEventListener('progress', (e) => {
       if (e.lengthComputable) setUploadProgress(Math.round(e.loaded / e.total * 100));
     });
+    xhr.upload.addEventListener('loadend', () => setPhase('processing'));
+    xhr.addEventListener('load', () => { void handleResponse(xhr.status, xhr.responseText, file.name); });
+    xhr.addEventListener('error', () => { setError('Upload failed — check your connection and try again'); setPhase('error'); });
+    xhr.addEventListener('timeout', () => { setError('Upload timed out — file may be too large for your connection'); setPhase('error'); });
 
-    xhr.upload.addEventListener('loadend', () => {
-      setPhase('processing');
-    });
-
-    xhr.addEventListener('load', () => {
-      try {
-        const data = JSON.parse(xhr.responseText);
-        if (xhr.status >= 400 || data.error) {
-          setError(data.error ?? `Upload failed (HTTP ${xhr.status})`);
-          setPhase('error');
-        } else if (data.status === 'extracting_locally') {
-          // Large file — local worker is extracting. Poll for result.
-          setExtractionStep(1);
-          const pollExtraction = async () => {
-            const tk = await getToken();
-            const pollInterval = setInterval(async () => {
-              try {
-                const res = await fetch(`/api/extract?id=${data.extractionId}`, {
-                  headers: tk ? { Authorization: `Bearer ${tk}` } : {},
-                });
-                const poll = await res.json();
-                if (poll.progress) {
-                  // Update the extraction step caption with real progress
-                  setExtractionStep(prev => Math.min(prev + 1, EXTRACTION_STEPS.length - 1));
-                }
-                if (poll.status === 'completed') {
-                  clearInterval(pollInterval);
-                  setPhase('done');
-                  onExtracted(poll.text ?? '', data.filename ?? file.name, poll.chapters ?? null);
-                }
-                if (poll.status === 'failed') {
-                  clearInterval(pollInterval);
-                  setError(poll.error ?? 'Extraction failed');
-                  setPhase('error');
-                }
-              } catch { /* keep polling */ }
-            }, 2000);
-          };
-          pollExtraction();
-        } else {
-          setPhase('done');
-          onExtracted(data.text ?? '', data.filename ?? file.name, data.chapters ?? null);
-        }
-      } catch {
-        setError('Failed to parse server response');
-        setPhase('error');
-      }
-    });
-
-    xhr.addEventListener('error', () => {
-      setError('Upload failed — check your connection and try again');
-      setPhase('error');
-    });
-
-    xhr.addEventListener('timeout', () => {
-      setError('Upload timed out — file may be too large for your connection');
-      setPhase('error');
-    });
-
-    xhr.timeout = 300000; // 5 min
+    xhr.timeout = 300000;
     xhr.open('POST', '/api/upload');
-    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
-    xhr.send(fd);
+    void getToken().then(token => {
+      if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+      xhr.send(fd);
+    });
+  };
+
+  const startUploadViaStorage = async (file: File) => {
+    const auth = (await import('../lib/firebase')).getFirebaseAuth();
+    const uid = auth.currentUser?.uid;
+    if (!uid) { setError('You must be signed in to upload'); setPhase('error'); return; }
+
+    const safeName = file.name.replace(/[^\w.\- ]+/g, '_');
+    const storagePath = `uploads/${uid}/${Date.now()}_${safeName}`;
+    const storage = getFirebaseStorage();
+    const ref = storageRef(storage, storagePath);
+
+    const task = uploadBytesResumable(ref, file, { contentType: file.type || 'application/octet-stream' });
+    task.on('state_changed',
+      (snap) => setUploadProgress(Math.round(snap.bytesTransferred / snap.totalBytes * 100)),
+      (err) => { setError(`Storage upload failed: ${err.code ?? 'unknown'}`); setPhase('error'); },
+    );
+
+    try { await task; }
+    catch { return; /* error handler above already set state */ }
+
+    setPhase('processing');
+    const token = await getToken();
+    try {
+      const res = await fetch('/api/upload', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ storagePath, filename: file.name }),
+      });
+      const text = await res.text();
+      void handleResponse(res.status, text, file.name);
+    } catch {
+      setError('Server unreachable — check your connection');
+      setPhase('error');
+    }
   };
 
   const handleRetry = () => { if (selectedFile) startUpload(selectedFile); };

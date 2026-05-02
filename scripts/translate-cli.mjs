@@ -178,6 +178,34 @@ async function ocrPdfBuffer(pdfBuf) {
   });
 }
 
+const IMAGE_OCR_PROMPT = `Extract ALL text from this image exactly as written. This may be a scan or photograph of a page containing Gujarati and/or English text. Preserve:
+- All Gujarati Unicode text exactly as it appears
+- All English text exactly
+- All numbers, dates, names
+- Paragraph breaks and structure
+- Any headings, bullet points, or numbered lists
+
+Return ONLY the extracted text — no commentary, no notes, no preamble.`;
+
+const IMAGE_MEDIA_TYPES = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+};
+
+async function ocrImageBuffer(imgBuf, mediaType) {
+  const base64 = imgBuf.toString('base64');
+  return await callClaude({
+    system: 'You are an OCR engine. Extract text from images preserving all original formatting and language scripts (especially Gujarati).',
+    contentBlocks: [
+      { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
+      { type: 'text', text: IMAGE_OCR_PROMPT },
+    ],
+  });
+}
+
 // ── Extract text from input ─────────────────────────────────────────────────
 
 const ext = extname(absPath).toLowerCase();
@@ -223,8 +251,14 @@ if (ext === '.txt') {
     }
     text = parts.join('\n\n').trim();
   }
+} else if (IMAGE_MEDIA_TYPES[ext]) {
+  console.log(`Image input — running Claude vision OCR…`);
+  const buf = readFileSync(absPath);
+  text = await ocrImageBuffer(buf, IMAGE_MEDIA_TYPES[ext]);
+  text = text.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  console.log(`OCR complete — ${text.split(/\s+/).filter(Boolean).length} words extracted`);
 } else {
-  console.error(`Unsupported extension: ${ext}. Use .txt, .docx, or text-PDF.`);
+  console.error(`Unsupported extension: ${ext}. Use .txt, .docx, .pdf, .png, .jpg, .jpeg, .webp, or .gif.`);
   process.exit(1);
 }
 

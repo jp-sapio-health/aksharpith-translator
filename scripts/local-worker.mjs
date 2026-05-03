@@ -1035,48 +1035,67 @@ async function processTransliterationStage(parentDoc) {
 
   await parentRef.update({ status: 'assembling' });
 
-  // Read all page docs in pageNum order, assemble Gujarati.
+  // Read all page docs in pageNum order. We transliterate per page so the UI
+  // can render per-page collapsible sections (Sally's UX brief), and so verse
+  // boundaries that align with page boundaries stay sensible.
   const pagesSnap = await parentRef.collection('pages').orderBy('pageNum').get();
-  const assembled = pagesSnap.docs
+  const pageDocs = pagesSnap.docs.filter(d => (d.data().gujaratiText ?? '').trim());
+  const assembledGujarati = pageDocs
     .map(d => d.data().gujaratiText ?? '')
     .filter(Boolean)
     .join('\n\n');
-  await parentRef.update({ gujaratiOutput: assembled, status: 'transliterating' });
+  await parentRef.update({ gujaratiOutput: assembledGujarati, status: 'transliterating' });
 
-  // Run the transliterator stage with the verse-aware chunker so long books
-  // don't bust Sonnet's context window. Each chunk: transliterate → enforce
-  // ā-only diacritics → join via assembler. Mirrors runTransliterationPipeline
-  // in lib/pipeline.ts; kept inline here to avoid an IPC bridge to TypeScript.
+  // Per-page transliteration: each page's gujaratiText becomes that page's
+  // transliteratedText on the page doc. Long pages still get chunked
+  // internally to stay under Sonnet's context window. Batches of 4 page-
+  // jobs run in parallel.
   try {
     const system = await getTransliteratorSystem();
-    const chunks = deterministicChunk(assembled);
-    if (chunks.length === 0) throw new Error('No content to transliterate');
+    const PAGE_BATCH = 4;
+    let done = 0;
 
-    console.log(`  Chunked into ${chunks.length} piece${chunks.length === 1 ? '' : 's'}`);
-    const transliteratedChunks = new Array(chunks.length).fill('');
+    async function transliteratePage(pageDoc) {
+      const pageData = pageDoc.data();
+      const guj = pageData.gujaratiText ?? '';
+      if (!guj.trim()) return;
+      // Skip if already done (resume support).
+      if ((pageData.transliteratedText ?? '').trim()) { done++; return; }
 
-    // Process in batches of BATCH (5) for parallel SDK calls.
-    for (let start = 0; start < chunks.length; start += BATCH) {
-      const slice = chunks.slice(start, start + BATCH);
-      await Promise.all(slice.map(async (chunk, k) => {
-        const i = start + k;
-        const prompt = `Chunk ${i + 1} of ${chunks.length}. Transliterate the following Gujarati passage into Roman script per the rules above. Output ONLY <transliteration>…</transliteration>.\n\nGUJARATI:\n${chunk}`;
+      const chunks = deterministicChunk(guj);
+      const chunkOuts = [];
+      for (const chunk of chunks) {
+        const prompt = `Transliterate the following Gujarati passage into Roman script per the rules above. Output ONLY <transliteration>…</transliteration>.\n\nGUJARATI:\n${chunk}`;
         const raw = await callClaude({
           model: SONNET, max_tokens: 8192,
           system,
           messages: [{ role: 'user', content: prompt }],
         });
         const match = raw.match(/<transliteration>([\s\S]*?)<\/transliteration>/);
-        if (!match) throw new Error(`Chunk ${i + 1}: transliterator did not return <transliteration> block`);
-        // Apply worker's enforcer to each chunk (curly quotes, en dashes,
-        // basic punctuation). The transliterator prompt itself enforces the
-        // ā-only diacritic rule on the model side.
-        transliteratedChunks[i] = rulesEnforcerAgent(match[1].trim()).text;
-        console.log(`    ✓ chunk ${i + 1}/${chunks.length}`);
-      }));
+        if (!match) throw new Error(`page ${pageData.pageNum}: transliterator did not return <transliteration> block`);
+        chunkOuts.push(rulesEnforcerAgent(match[1].trim()).text);
+      }
+      const pageTranslit = chunks.length > 1
+        ? rulesEnforcerAgent(assemblerAgent(chunkOuts)).text
+        : chunkOuts[0] ?? '';
+      await pageDoc.ref.update({ transliteratedText: pageTranslit });
+      done++;
+      console.log(`    ✓ page ${pageData.pageNum}/${parent.totalPages} → ${pageTranslit.split(/\s+/).length} words`);
     }
 
-    const assembledTranslit = assemblerAgent(transliteratedChunks);
+    for (let start = 0; start < pageDocs.length; start += PAGE_BATCH) {
+      const slice = pageDocs.slice(start, start + PAGE_BATCH);
+      await Promise.all(slice.map(transliteratePage));
+    }
+
+    // Assemble doc-level output by joining per-page transliterations. The UI
+    // can also render from page docs directly; transliteratedOutput exists
+    // for download exports and admin / overview consumers.
+    const finalPagesSnap = await parentRef.collection('pages').orderBy('pageNum').get();
+    const assembledTranslit = finalPagesSnap.docs
+      .map(d => d.data().transliteratedText ?? '')
+      .filter(Boolean)
+      .join('\n\n');
     const finalTranslit = rulesEnforcerAgent(assembledTranslit).text;
 
     await parentRef.update({
@@ -1085,7 +1104,7 @@ async function processTransliterationStage(parentDoc) {
       completedAt: new Date().toISOString(),
     });
     pdfCache.delete(parentRef.id);
-    console.log(`  ✓ transliteration complete — ${finalTranslit.split(/\s+/).length} words across ${chunks.length} chunks`);
+    console.log(`  ✓ transliteration complete — ${finalTranslit.split(/\s+/).length} words across ${pageDocs.length} pages`);
   } catch (err) {
     console.error(`[worker] Transliteration failed: ${err.message}`);
     await parentRef.update({

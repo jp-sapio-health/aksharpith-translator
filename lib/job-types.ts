@@ -92,6 +92,11 @@ export interface PageJob {
   claimedBy?: string;               // worker process id holding the lock
   claimedAt?: string;               // ISO — for stale-claim reaper
   gujaratiText?: string;            // populated when status = 'ocr_done'
+  /** Per-page Roman transliteration. Populated by the transliterator stage
+   *  AFTER all pages are OCR'd. The UI uses this to render per-page
+   *  collapsible sections; the doc-level `transliteratedOutput` is still
+   *  written on the parent for downloads and admin overview. */
+  transliteratedText?: string;
   wordCount?: number;
   error?: string;
   createdAt: string;

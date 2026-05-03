@@ -85,26 +85,39 @@ export default function TransliterationJobPage({
     return unsub;
   }, [jobId, user, forbidden]);
 
-  // Per-page section parsing for the transliteration output.
-  // The transliterator emits assembled text; for MVP we just render it as one
-  // block. Per-page sections come later when we tag chunk boundaries.
-  const transliteratedHtml = useMemo(() => {
-    if (!job?.transliteratedOutput) return null;
-    // Convert <verse>…</verse> markers to italic spans for display; strip
-    // the markup itself.
-    return job.transliteratedOutput
-      .split(/\n\n/)
-      .map((block, i) => {
-        const verseMatch = block.match(/<verse>([\s\S]*?)<\/verse>/g);
-        if (verseMatch) {
-          const inner = block.replace(/<\/?verse>/g, '');
-          return (
-            <p key={i} className="italic text-stone-700 border-l-4 border-amber-600 pl-4 my-3">{inner}</p>
-          );
-        }
-        return <p key={i} className="my-2 leading-relaxed">{block}</p>;
-      });
-  }, [job?.transliteratedOutput]);
+  // Pages where transliteration has populated. We render per-page sections
+  // from these (Sally's UX brief: collapsible page sections, eye icon to
+  // toggle the original Gujarati under each Roman line).
+  const transliteratedPages = useMemo(
+    () => pages.filter(p => (p.transliteratedText ?? '').trim().length > 0),
+    [pages],
+  );
+
+  // Track which page sections have their "view original Gujarati" expanded.
+  const [openOriginals, setOpenOriginals] = useState<Set<number>>(new Set());
+  const toggleOriginal = (pageNum: number) => {
+    setOpenOriginals(prev => {
+      const next = new Set(prev);
+      if (next.has(pageNum)) next.delete(pageNum); else next.add(pageNum);
+      return next;
+    });
+  };
+
+  function renderTransliteratedBlocks(text: string) {
+    // Convert <verse>…</verse> markers to italic styled paragraphs; strip
+    // the markup itself. Plain prose paragraphs render normally.
+    return text.split(/\n\n/).map((block, i) => {
+      const trimmed = block.trim();
+      if (!trimmed) return null;
+      if (/<verse>[\s\S]*?<\/verse>/.test(trimmed)) {
+        const inner = trimmed.replace(/<\/?verse>/g, '');
+        return (
+          <p key={i} className="italic text-stone-700 border-l-4 border-amber-600 pl-4 my-3">{inner}</p>
+        );
+      }
+      return <p key={i} className="my-2 leading-relaxed">{trimmed}</p>;
+    });
+  }
 
   const triggerTranslation = async () => {
     if (!job) return;
@@ -222,7 +235,7 @@ export default function TransliterationJobPage({
           )}
         </section>
 
-        {/* Right pane: transliteration (the hero) */}
+        {/* Right pane: per-page transliteration sections (the hero) */}
         <section className="bg-white rounded-lg border border-amber-200 p-5">
           <div className="flex items-center justify-between mb-3">
             <h2 className="font-semibold text-amber-900">Transliteration (Roman, ā-only)</h2>
@@ -237,12 +250,44 @@ export default function TransliterationJobPage({
               </div>
             )}
           </div>
-          {job.transliteratedOutput ? (
-            <div className="font-serif text-stone-800 text-sm max-h-[70vh] overflow-y-auto">{transliteratedHtml}</div>
-          ) : (
+          {transliteratedPages.length === 0 ? (
             <p className="text-stone-400 italic">
               {job.status === 'transliterating' ? 'Transliterating now…' : 'Awaiting OCR completion.'}
             </p>
+          ) : (
+            <div className="font-serif text-stone-800 text-sm max-h-[75vh] overflow-y-auto space-y-4">
+              {transliteratedPages.map((p) => {
+                const open = openOriginals.has(p.pageNum);
+                return (
+                  <article key={p.pageNum} className="border-b border-stone-100 last:border-0 pb-3">
+                    <header className="flex items-center justify-between mb-2 sticky top-0 bg-white py-1">
+                      <span className="text-xs font-mono uppercase tracking-wider text-stone-500">
+                        Page {p.pageNum}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => toggleOriginal(p.pageNum)}
+                        title={open ? 'Hide original Gujarati' : 'View original Gujarati'}
+                        className={cn(
+                          'text-xs px-2 py-0.5 rounded-full border transition-colors',
+                          open
+                            ? 'bg-stone-100 text-stone-700 border-stone-300'
+                            : 'text-stone-400 hover:text-stone-700 hover:bg-stone-50 border-transparent',
+                        )}
+                      >
+                        {open ? '👁 hide original' : '👁 view original'}
+                      </button>
+                    </header>
+                    {open && p.gujaratiText && (
+                      <pre className="whitespace-pre-wrap text-xs text-stone-600 bg-stone-50 border border-stone-200 rounded p-2 mb-2">
+                        {p.gujaratiText}
+                      </pre>
+                    )}
+                    <div>{renderTransliteratedBlocks(p.transliteratedText ?? '')}</div>
+                  </article>
+                );
+              })}
+            </div>
           )}
         </section>
       </div>

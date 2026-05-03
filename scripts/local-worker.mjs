@@ -1195,23 +1195,102 @@ async function processTranslationStage(parentDoc) {
   }
 }
 
+// ── Pack-writer queue (bk-syllabus-hub) ──────────────────────────────────────
+//
+// Each doc carries the full prompt that the API route already assembled —
+// system + user — so this worker stays generic. It just runs Claude once
+// and writes back `result.markdown`. Failure surfaces as `status: 'failed'`
+// + `error` so the syllabus-hub UI can show it. Single in-flight job at a
+// time to be respectful of the Claude Max budget shared with the
+// translation/transliteration pipelines.
+
+const PACK_WRITER_COLLECTION = 'packWriterJobs';
+let packWriterInFlight = false;
+
+async function pollForPackWriterJobs() {
+  if (packWriterInFlight) return;
+  try {
+    const snapshot = await db.collection(PACK_WRITER_COLLECTION)
+      .where('status', '==', 'pending')
+      .limit(1)
+      .get();
+    if (snapshot.empty) return;
+
+    const doc = snapshot.docs[0];
+    const jobId = doc.id;
+    const data = doc.data();
+    const prompt = data.prompt ?? {};
+
+    if (typeof prompt.system !== 'string' || typeof prompt.user !== 'string') {
+      console.error(`[pack-writer] ${jobId} missing prompt.system or prompt.user — failing`);
+      await doc.ref.update({
+        status: 'failed',
+        error: 'Job is missing prompt.system or prompt.user',
+        completedAt: new Date().toISOString(),
+      });
+      return;
+    }
+
+    // Optimistic claim — if someone else races, the second writer just retries.
+    packWriterInFlight = true;
+    await doc.ref.update({
+      status: 'running',
+      startedAt: new Date().toISOString(),
+      claimedBy: WORKER_ID,
+    });
+    console.log(`[pack-writer] picked up ${jobId} — generating…`);
+
+    try {
+      const text = await callClaude({
+        system: prompt.system,
+        messages: [{ role: 'user', content: prompt.user }],
+        model: prompt.model || SONNET,
+      });
+
+      await doc.ref.update({
+        status: 'done',
+        completedAt: new Date().toISOString(),
+        result: {
+          markdown: text,
+          chars: text.length,
+          words: text.split(/\s+/).filter(Boolean).length,
+        },
+      });
+      console.log(`[pack-writer] ✓ ${jobId} done — ${text.length} chars`);
+    } catch (err) {
+      console.error(`[pack-writer] ✗ ${jobId} failed: ${err.message}`);
+      await doc.ref.update({
+        status: 'failed',
+        error: (err.message ?? 'Unknown error').slice(0, 500),
+        completedAt: new Date().toISOString(),
+      });
+    }
+  } catch (err) {
+    console.error(`[pack-writer] poll error: ${err.message}`);
+  } finally {
+    packWriterInFlight = false;
+  }
+}
+
 // ── Start ────────────────────────────────────────────────────────────────────
 
 console.log('[worker] Aksharpith local worker started (using claude CLI — Max subscription)');
 console.log(`[worker] Worker id: ${WORKER_ID}`);
-console.log(`[worker] Polling Firestore every ${POLL_INTERVAL / 1000}s for jobs + extractions + transliterations...`);
+console.log(`[worker] Polling Firestore every ${POLL_INTERVAL / 1000}s for jobs + extractions + transliterations + pack-writer…`);
 
 // Initial poll
 pollForJobs();
+pollForPackWriterJobs();
 
-// Continuous polling — round-robin across the four queues.
+// Continuous polling — round-robin across the five queues.
 let pollCycle = 0;
 setInterval(() => {
-  const phase = pollCycle % 4;
+  const phase = pollCycle % 5;
   if (phase === 0) pollForJobs();
   else if (phase === 1) pollForExtractions();
   else if (phase === 2) pollForPageJobs();
-  else pollForTransliterationJobs();
+  else if (phase === 3) pollForTransliterationJobs();
+  else pollForPackWriterJobs();
   pollCycle++;
 }, POLL_INTERVAL);
 

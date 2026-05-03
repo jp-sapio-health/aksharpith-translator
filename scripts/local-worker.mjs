@@ -857,33 +857,52 @@ async function renderPageToPng(pdfBuf, pageNum) {
 async function pollForPageJobs() {
   if (processing) return; // serialise with translation jobs for now
   try {
-    // Reaper: unclaim pages whose ocr_running claim has gone stale. Single-
-    // field query (status only) — composite index not required. We filter the
-    // staleness threshold client-side, which is fine at this scale.
-    const staleSnap = await db.collectionGroup('pages')
-      .where('status', '==', 'ocr_running')
-      .limit(20).get();
+    // Find active parent jobs first. Avoids collectionGroup queries (which
+    // need single-field index exemptions Firebase doesn't auto-create).
+    // Fetch parents in pending or ocr_running state, then walk their pages
+    // subcollections — those subcollection queries are auto-indexed because
+    // their path is fully specified.
+    const activeParents = [];
+    for (const status of ['pending', 'ocr_running']) {
+      const snap = await db.collection('transliterationJobs')
+        .where('status', '==', status)
+        .limit(5).get();
+      activeParents.push(...snap.docs);
+    }
+    if (activeParents.length === 0) return;
+
+    // Reaper: unclaim pages whose ocr_running claim has gone stale.
     const staleCutoff = new Date(Date.now() - STALE_CLAIM_MS).toISOString();
-    for (const doc of staleSnap.docs) {
-      const claimedAt = doc.data().claimedAt;
-      if (claimedAt && claimedAt < staleCutoff) {
-        await doc.ref.update({ status: 'pending', claimedBy: null, claimedAt: null });
-        console.log(`[worker] Reaped stale claim on ${doc.ref.path}`);
+    for (const parent of activeParents) {
+      const stale = await parent.ref.collection('pages')
+        .where('status', '==', 'ocr_running')
+        .limit(10).get();
+      for (const doc of stale.docs) {
+        const claimedAt = doc.data().claimedAt;
+        if (claimedAt && claimedAt < staleCutoff) {
+          await doc.ref.update({ status: 'pending', claimedBy: null, claimedAt: null });
+          console.log(`[worker] Reaped stale claim on ${doc.ref.path}`);
+        }
       }
     }
 
-    // Pick one pending page. Single-field query — composite index not
-    // required. The `attempts < 3` cap is enforced inside the claim
-    // transaction below (re-read the doc, abort if exhausted).
-    const snapshot = await db.collectionGroup('pages')
-      .where('status', '==', 'pending')
-      .limit(1).get();
-    if (snapshot.empty) return;
+    // Pick the first pending page across active parents.
+    let pageRef = null;
+    let parentRef = null;
+    for (const parent of activeParents) {
+      const snap = await parent.ref.collection('pages')
+        .where('status', '==', 'pending')
+        .orderBy('pageNum')
+        .limit(1).get();
+      if (!snap.empty) {
+        pageRef = snap.docs[0].ref;
+        parentRef = parent.ref;
+        break;
+      }
+    }
+    if (!pageRef || !parentRef) return;
 
     processing = true;
-    const pageRef = snapshot.docs[0].ref;
-    const parentRef = pageRef.parent.parent;
-    if (!parentRef) { processing = false; return; }
 
     // Claim via transaction. Enforce attempts cap here so the picker query
     // can stay single-field (no composite index required).

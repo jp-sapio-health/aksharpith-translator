@@ -129,6 +129,8 @@ async function callClaudeOnce(params) {
       maxTurns: 1,                     // single response, no agent loop
       cwd: SDK_CWD,
       permissionMode: 'bypassPermissions',
+      settingSources: [],              // skip user/project Claude Code settings — keeps MCPs out
+      mcpServers: {},                  // explicit: no MCP servers (otherwise Sonnet refuses OCR)
     },
   });
 
@@ -806,6 +808,8 @@ async function callClaudeWithImage(system, prompt, base64Png) {
       maxTurns: 1,
       cwd: SDK_CWD,
       permissionMode: 'bypassPermissions',
+      settingSources: [],              // skip user/project Claude Code settings
+      mcpServers: {},                  // no MCPs — otherwise Sonnet thinks it's in Claude Code
     },
   });
   let text = '';

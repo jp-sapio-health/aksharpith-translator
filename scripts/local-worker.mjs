@@ -968,6 +968,14 @@ async function pollForPageJobs() {
       const cleaned = text.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
       const wordCount = cleaned.split(/\s+/).filter(Boolean).length;
 
+      // Sanity check: did we get Gujarati back, or one of Sonnet's many ways
+      // of refusing? ("I don't see any image", "transcribing Gujarati is
+      // extremely challenging", etc.) Throw to trigger the retry path.
+      const indicCount = (cleaned.match(/[઀-૿]/g) ?? []).length;
+      if (cleaned.length > 0 && indicCount / cleaned.length < 0.05) {
+        throw new Error(`OCR returned non-Gujarati response (${indicCount}/${cleaned.length} chars Indic) — likely model refusal or missing image payload`);
+      }
+
       await pageRef.update({
         status: 'ocr_done',
         gujaratiText: cleaned,

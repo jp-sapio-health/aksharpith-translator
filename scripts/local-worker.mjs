@@ -836,21 +836,37 @@ async function getPdfBuffer(jobId, blobUrl) {
 }
 
 async function renderPageToPng(pdfBuf, pageNum) {
-  // pdf-to-png-converter is heavy (loads canvas + pdfjs). Lazy-load.
-  const { pdfToPng } = await import('pdf-to-png-converter');
-  const tmpPath = resolvePath(tmpdir(), `aksharpith-${WORKER_ID}-page-${pageNum}-${Date.now()}.pdf`);
-  writeFileSync(tmpPath, pdfBuf);
+  // pdfjs-based renderers (incl. pdf-to-png-converter) silently produce blank
+  // PNGs for some scanner-output PDFs (Xerox AltaLink, etc.) — pdfjs can't
+  // decode their font subsetting and emits a transparent canvas. Sonnet then
+  // sees a blank image and OCR returns "I can't see any text" English instead
+  // of Gujarati. Shell out to poppler's pdftoppm — much more compatible.
+  // Requires `brew install poppler` on the worker host.
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const { readFileSync: rf } = await import('node:fs');
+  const execFileP = promisify(execFile);
+
+  const stamp = `${WORKER_ID}-${pageNum}-${Date.now()}`;
+  const tmpPdf = resolvePath(tmpdir(), `aksharpith-${stamp}.pdf`);
+  const outRoot = resolvePath(tmpdir(), `aksharpith-${stamp}-out`);
+  writeFileSync(tmpPdf, pdfBuf);
   try {
-    const pages = await pdfToPng(tmpPath, {
-      pagesToProcess: [pageNum], // 1-indexed
-      viewportScale: 2.0,        // 2x for better OCR fidelity on small text
-      outputFolder: undefined,    // keep in memory
-      strictPagesToProcess: true,
-    });
-    if (!pages.length) throw new Error(`No PNG returned for page ${pageNum}`);
-    return pages[0].content; // Buffer of PNG bytes
+    await execFileP('pdftoppm', [
+      '-r', '200',            // ≈ 2x at typical 100 DPI source
+      '-png',
+      '-f', String(pageNum),
+      '-l', String(pageNum),
+      '-singlefile',          // emits exactly <outRoot>.png
+      tmpPdf,
+      outRoot,
+    ]);
+    const pngPath = `${outRoot}.png`;
+    const pngBuf = rf(pngPath);
+    try { unlinkSync(pngPath); } catch { /* ok */ }
+    return pngBuf;
   } finally {
-    try { unlinkSync(tmpPath); } catch { /* ok */ }
+    try { unlinkSync(tmpPdf); } catch { /* ok */ }
   }
 }
 

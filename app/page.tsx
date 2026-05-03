@@ -185,6 +185,7 @@ const EXTRACTION_STEPS: Array<{ label: string; detail: string }> = [
 ];
 
 function FileUpload({ onExtracted, disabled, getToken }: { onExtracted: (text: string, filename: string, chapters: Array<{ title: string; startLine: number }> | null) => void; disabled: boolean; getToken: () => Promise<string | null> }) {
+  const router = useRouter();
   const [dragging, setDragging]           = useState(false);
   const [selectedFile, setSelectedFile]   = useState<File | null>(null);
   const [phase, setPhase]                 = useState<UploadPhase>('idle');
@@ -228,13 +229,20 @@ function FileUpload({ onExtracted, disabled, getToken }: { onExtracted: (text: s
   };
 
   const handleResponse = async (status: number, responseText: string, fallbackFilename: string) => {
-    let data: { error?: string; status?: string; extractionId?: string; text?: string; filename?: string; chapters?: Array<{ title: string; startLine: number }> | null } = {};
+    let data: { error?: string; status?: string; extractionId?: string; jobId?: string; totalPages?: number; text?: string; filename?: string; chapters?: Array<{ title: string; startLine: number }> | null } = {};
     try { data = JSON.parse(responseText); }
     catch { setError('Failed to parse server response'); setPhase('error'); return; }
 
     if (status >= 400 || data.error) {
       setError(data.error ?? `Upload failed (HTTP ${status})`);
       setPhase('error');
+      return;
+    }
+
+    // Transliteration-first pipeline (PDFs, page-by-page). Redirect to the
+    // job view, which subscribes to Firestore for live progress.
+    if (data.status === 'transliterating' && data.jobId) {
+      router.push(`/transliterate/${data.jobId}`);
       return;
     }
 

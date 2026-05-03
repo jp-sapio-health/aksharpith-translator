@@ -23,10 +23,14 @@ export interface SmootherOutput {
   smoothed: string;
 }
 
+export interface TransliteratorOutput {
+  transliteration: string;
+}
+
 export class ParserError extends Error {
   constructor(
     message: string,
-    public readonly stage: 'translator' | 'smoother',
+    public readonly stage: 'translator' | 'smoother' | 'transliterator',
     public readonly rawPreview: string,
   ) {
     super(message);
@@ -55,7 +59,7 @@ function stripFences(raw: string): string {
 function extractSingleTag(
   source: string,
   tag: string,
-  stage: 'translator' | 'smoother',
+  stage: 'translator' | 'smoother' | 'transliterator',
 ): string {
   const open = `<${tag}>`;
   const close = `</${tag}>`;
@@ -175,4 +179,35 @@ export function parseSmoother(raw: string): SmootherOutput {
     );
   }
   return { smoothed };
+}
+
+/**
+ * Parse the transliterator's XML response.
+ *
+ * Expected format (strict):
+ *   <transliteration>...</transliteration>
+ *
+ * The block may contain <verse>…</verse> markup which the renderer uses to
+ * italicise verse lines; we leave that markup intact in the returned string
+ * so downstream code (DOCX writer, UI) can interpret it. Plain prose is
+ * returned verbatim.
+ */
+export function parseTransliterator(raw: string): TransliteratorOutput {
+  if (typeof raw !== 'string') {
+    throw new ParserError('Empty or non-string transliterator output', 'transliterator', String(raw));
+  }
+  const cleaned = stripFences(raw);
+  if (!cleaned) {
+    throw new ParserError('Empty transliterator output', 'transliterator', '');
+  }
+
+  const transliteration = extractSingleTag(cleaned, 'transliteration', 'transliterator');
+  if (!transliteration) {
+    throw new ParserError(
+      'Empty <transliteration> block',
+      'transliterator',
+      cleaned.slice(0, 200),
+    );
+  }
+  return { transliteration };
 }

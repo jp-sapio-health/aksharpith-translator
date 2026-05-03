@@ -1011,30 +1011,49 @@ async function processTransliterationStage(parentDoc) {
     .join('\n\n');
   await parentRef.update({ gujaratiOutput: assembled, status: 'transliterating' });
 
-  // Run the transliterator stage (verse-aware chunker → transliterator → ā-only enforcer).
-  // For MVP: single SDK call with the assembled text. Chunking is handled by
-  // the existing pipeline.ts in PR #2 — for now feed the whole text in one call,
-  // accepting that very long books may need splitting later.
+  // Run the transliterator stage with the verse-aware chunker so long books
+  // don't bust Sonnet's context window. Each chunk: transliterate → enforce
+  // ā-only diacritics → join via assembler. Mirrors runTransliterationPipeline
+  // in lib/pipeline.ts; kept inline here to avoid an IPC bridge to TypeScript.
   try {
     const system = await getTransliteratorSystem();
-    const userPrompt = `Transliterate the following Gujarati passage into Roman script per the rules above. Output ONLY <transliteration>…</transliteration>.\n\nGUJARATI:\n${assembled}`;
-    const raw = await callClaude({
-      model: SONNET, max_tokens: 16_000,
-      system,
-      messages: [{ role: 'user', content: userPrompt }],
-    });
-    // Extract <transliteration> block.
-    const match = raw.match(/<transliteration>([\s\S]*?)<\/transliteration>/);
-    if (!match) throw new Error('Transliterator did not return <transliteration> block');
-    const translit = match[1].trim();
+    const chunks = deterministicChunk(assembled);
+    if (chunks.length === 0) throw new Error('No content to transliterate');
+
+    console.log(`  Chunked into ${chunks.length} piece${chunks.length === 1 ? '' : 's'}`);
+    const transliteratedChunks = new Array(chunks.length).fill('');
+
+    // Process in batches of BATCH (5) for parallel SDK calls.
+    for (let start = 0; start < chunks.length; start += BATCH) {
+      const slice = chunks.slice(start, start + BATCH);
+      await Promise.all(slice.map(async (chunk, k) => {
+        const i = start + k;
+        const prompt = `Chunk ${i + 1} of ${chunks.length}. Transliterate the following Gujarati passage into Roman script per the rules above. Output ONLY <transliteration>…</transliteration>.\n\nGUJARATI:\n${chunk}`;
+        const raw = await callClaude({
+          model: SONNET, max_tokens: 8192,
+          system,
+          messages: [{ role: 'user', content: prompt }],
+        });
+        const match = raw.match(/<transliteration>([\s\S]*?)<\/transliteration>/);
+        if (!match) throw new Error(`Chunk ${i + 1}: transliterator did not return <transliteration> block`);
+        // Apply worker's enforcer to each chunk (curly quotes, en dashes,
+        // basic punctuation). The transliterator prompt itself enforces the
+        // ā-only diacritic rule on the model side.
+        transliteratedChunks[i] = rulesEnforcerAgent(match[1].trim()).text;
+        console.log(`    ✓ chunk ${i + 1}/${chunks.length}`);
+      }));
+    }
+
+    const assembledTranslit = assemblerAgent(transliteratedChunks);
+    const finalTranslit = rulesEnforcerAgent(assembledTranslit).text;
 
     await parentRef.update({
-      transliteratedOutput: translit,
+      transliteratedOutput: finalTranslit,
       status: 'done',
       completedAt: new Date().toISOString(),
     });
     pdfCache.delete(parentRef.id);
-    console.log(`  ✓ transliteration complete — ${translit.split(/\s+/).length} words`);
+    console.log(`  ✓ transliteration complete — ${finalTranslit.split(/\s+/).length} words across ${chunks.length} chunks`);
   } catch (err) {
     console.error(`[worker] Transliteration failed: ${err.message}`);
     await parentRef.update({
@@ -1053,21 +1072,43 @@ async function processTranslationStage(parentDoc) {
 
   await parentRef.update({ translationStatus: 'running' });
   try {
-    // Reuse the canonical translator+smoother chain on the assembled Gujarati.
-    // For MVP do a single chunk; the full chunked pipeline lives in pipeline.ts
-    // and will be wired in PR #2.
-    const raw = await callClaude({
-      model: SONNET, max_tokens: 16_000,
-      system: TRANSLATOR_SYSTEM,
-      messages: [{ role: 'user', content: `Translate the following Gujarati text into English following the rules above. Output ONLY <translation>…</translation><flags>…</flags>.\n\nGUJARATI:\n${parent.gujaratiOutput}` }],
-    });
-    const tMatch = raw.match(/<translation>([\s\S]*?)<\/translation>/);
-    if (!tMatch) throw new Error('Translator did not return <translation> block');
+    // Run the canonical translator → enforcer → smoother → enforcer chain over
+    // the assembled Gujarati, chunked. Mirrors the existing /jobs/ pipeline.
+    const chunks = deterministicChunk(parent.gujaratiOutput ?? '');
+    if (chunks.length === 0) throw new Error('No Gujarati content to translate');
+    console.log(`  Chunked into ${chunks.length} piece${chunks.length === 1 ? '' : 's'}`);
+
+    const translations = new Array(chunks.length).fill('');
+    const smoothed = new Array(chunks.length).fill('');
+
+    for (let start = 0; start < chunks.length; start += BATCH) {
+      const slice = chunks.slice(start, start + BATCH);
+      await Promise.all(slice.map(async (chunk, k) => {
+        const i = start + k;
+        // Translate
+        const tOut = await translatorAgent(chunk, i, chunks.length);
+        translations[i] = rulesEnforcerAgent(tOut.translation).text;
+        console.log(`    ✓ translated chunk ${i + 1}/${chunks.length}`);
+        // Smooth
+        try {
+          const sOut = await smootherAgent(translations[i]);
+          smoothed[i] = rulesEnforcerAgent(sOut.smoothed).text;
+        } catch (err) {
+          console.warn(`    ⚠ smoother fallback on chunk ${i + 1}: ${err.message}`);
+          smoothed[i] = translations[i];
+        }
+        console.log(`    ✓ smoothed chunk ${i + 1}/${chunks.length}`);
+      }));
+    }
+
+    const assembledEn = assemblerAgent(smoothed);
+    const finalEn = rulesEnforcerAgent(assembledEn).text;
+
     await parentRef.update({
-      translationOutput: tMatch[1].trim(),
+      translationOutput: finalEn,
       translationStatus: 'done',
     });
-    console.log('  ✓ translation complete');
+    console.log(`  ✓ translation complete — ${finalEn.split(/\s+/).length} words across ${chunks.length} chunks`);
   } catch (err) {
     console.error(`[worker] Translation failed: ${err.message}`);
     await parentRef.update({

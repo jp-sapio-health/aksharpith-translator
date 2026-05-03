@@ -10,9 +10,10 @@ import {
   buildTranslatorSystem,
   buildSmootherSystem,
 } from './rules';
+import { buildTransliteratorSystem } from './rules/transliterator-prompt';
 import type { RulesCorrection } from './rules';
 import type { PipelineInput, PipelineAuth, ProgressReporter, ChunkProgress } from './job-types';
-import { parseTranslator, parseSmoother, ParserError } from './parser';
+import { parseTranslator, parseSmoother, parseTransliterator, ParserError } from './parser';
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -23,8 +24,9 @@ const MAX_RETRIES       = 1;
 
 // ─── Build prompts once ──────────────────────────────────────────────────────
 
-const TRANSLATOR_SYSTEM = buildTranslatorSystem();
-const SMOOTHER_SYSTEM   = buildSmootherSystem();
+const TRANSLATOR_SYSTEM     = buildTranslatorSystem();
+const SMOOTHER_SYSTEM       = buildSmootherSystem();
+const TRANSLITERATOR_SYSTEM = buildTransliteratorSystem();
 
 // ─── Anthropic API helper ────────────────────────────────────────────────────
 
@@ -504,4 +506,90 @@ export async function runPipeline(
       translationId,
     },
   });
+}
+
+// ─── Transliterator agent + chunked transliteration pipeline ─────────────────
+//
+// New as of the transliteration-first pivot. Runs the verse-aware deterministic
+// chunker over the assembled Gujarati (page-by-page OCR output joined together),
+// calls the transliterator stage on each chunk, and reassembles. The same
+// rulesEnforcerAgent runs after each chunk to strip non-ā diacritics and apply
+// punctuation house-style rules.
+//
+// Output preserves any <verse>…</verse> markers the model emits — the DOCX
+// writer reads those to italicise verse lines; the .txt writer strips them.
+//
+// This is decoupled from runPipeline (translation): the worker calls them
+// independently. A single Gujarati input can be transliterated, then optionally
+// translated, in two separate worker passes.
+
+export async function transliteratorAgent(
+  apiKey: string,
+  chunk: string,
+  chunkIndex: number,
+  totalChunks: number,
+): Promise<{ transliteration: string }> {
+  const raw = await callClaude({
+    model: SONNET, max_tokens: 8192, apiKey,
+    system: TRANSLITERATOR_SYSTEM,
+    messages: [{
+      role: 'user',
+      content: `Chunk ${chunkIndex + 1} of ${totalChunks}. Transliterate the following Gujarati passage into Roman script per the rules above. Output ONLY <transliteration>…</transliteration>.\n\nGUJARATI:\n${chunk}`,
+    }],
+  });
+  return parseTransliterator(raw);
+}
+
+/**
+ * Run the full chunked transliteration pipeline on assembled Gujarati text.
+ * Returns the final Roman transliteration with ā-only diacritics enforced.
+ *
+ * Caller passes the full Gujarati string (already OCR'd and assembled by the
+ * worker). This function:
+ *   1. Chunks via the existing verse-aware deterministicChunk.
+ *   2. Runs the transliterator stage on each chunk in parallel batches.
+ *   3. Applies rulesEnforcerAgent to each chunk (strips forbidden diacritics).
+ *   4. Joins via assemblerAgent (deduplicates boundary overlap).
+ *   5. Final enforcer pass on the assembled output.
+ *
+ * Throws on transliterator parse failure — the worker decides whether to retry
+ * the failing chunk or fail the parent job.
+ */
+export async function runTransliterationPipeline(
+  gujarati: string,
+  apiKey: string,
+  onChunkProgress?: (done: number, total: number) => Promise<void> | void,
+): Promise<{ output: string; chunkCount: number; totalFixes: number }> {
+  const chunks = deterministicChunk(gujarati);
+  if (chunks.length === 0) throw new Error('No content to transliterate');
+
+  const transliterated: string[] = new Array(chunks.length).fill('');
+  let done = 0;
+
+  async function processChunk(i: number) {
+    const out = await transliteratorAgent(apiKey, chunks[i], i, chunks.length);
+    // Strip forbidden diacritics on the chunk before joining. Verse <verse>
+    // markup stays intact (rulesEnforcer only touches chars + punctuation).
+    transliterated[i] = rulesEnforcerAgent(out.transliteration).text;
+    done++;
+    if (onChunkProgress) await onChunkProgress(done, chunks.length);
+  }
+
+  for (let start = 0; start < chunks.length; start += BATCH) {
+    const slice = Array.from(
+      { length: Math.min(BATCH, chunks.length - start) },
+      (_, k) => start + k,
+    );
+    const results = await Promise.allSettled(slice.map(processChunk));
+    const firstFailure = results.find(r => r.status === 'rejected');
+    if (firstFailure && firstFailure.status === 'rejected') throw firstFailure.reason;
+  }
+
+  const assembled = assemblerAgent(transliterated);
+  const enforced = rulesEnforcerAgent(assembled);
+  return {
+    output: enforced.text,
+    chunkCount: chunks.length,
+    totalFixes: enforced.totalFixes,
+  };
 }

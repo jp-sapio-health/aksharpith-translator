@@ -47,6 +47,30 @@ service cloud.firestore {
       }
     }
 
+    // Transliteration-first jobs (page-by-page OCR + transliteration).
+    // Created by /api/upload, mutated by the local worker via admin SDK
+    // (which bypasses these rules). Clients read their own jobs and
+    // subscribe to the pages subcollection for live progress; admins read
+    // all jobs.
+    match /transliterationJobs/{jobId} {
+      allow read: if isOwner(resource.data.uid) || isAdmin();
+      allow create, delete: if false; // server only
+      // Owners may flip translateRequested true→false; nothing else.
+      allow update: if isOwner(resource.data.uid)
+                    && request.resource.data.uid == resource.data.uid
+                    && request.resource.data.kind == 'transliteration'
+                    && request.resource.data.diff(resource.data).affectedKeys()
+                       .hasOnly(['translateRequested']);
+
+      // Per-page OCR progress — read-only to clients/admins; worker writes.
+      match /pages/{pageNum} {
+        allow read: if isAdmin()
+                    || (isSignedIn()
+                        && get(/databases/$(database)/documents/transliterationJobs/$(jobId)).data.uid == request.auth.uid);
+        allow create, update, delete: if false; // server only
+      }
+    }
+
     // Future: editorial glossary overrides (Tier 2). Admins write, anyone signed in reads.
     match /config/{document=**} {
       allow read: if isSignedIn();

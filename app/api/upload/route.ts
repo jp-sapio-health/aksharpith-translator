@@ -4,9 +4,10 @@ import { PDFDocument } from 'pdf-lib';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const pdfParse = require('pdf-parse') as (buf: Buffer) => Promise<{ numpages: number; text: string }>;
 import { NextRequest } from 'next/server';
-import { del as blobDelete } from '@vercel/blob';
+import { del as blobDelete, put as blobPut } from '@vercel/blob';
 import { verifyAuthToken } from '../../../lib/verify-auth';
 import { adminDb } from '../../../lib/firebase-admin';
+import type { TransliterationJobDocument, PageJob } from '../../../lib/job-types';
 
 export const dynamic    = 'force-dynamic';
 export const maxDuration = 300;
@@ -264,6 +265,86 @@ function splitByWordCount(lines: string[], targetWords: number): Array<{ title: 
   return sections.length > 1 ? sections : [];
 }
 
+// ─── Transliteration job creation (page-by-page pipeline) ─────────────────────
+//
+// All PDFs route through this path now. The route uploads the buffer to Vercel
+// Blob (if not already there), counts pages, and creates a parent job doc plus
+// N child page docs. The local worker picks up the page jobs, OCRs each page
+// via the Claude Agent SDK (Max plan, no API spend), assembles the Gujarati
+// text, runs it through the transliterator, and writes the output back.
+//
+// Returns `{ jobId, totalPages, status: 'transliterating', filename }` so the
+// client can switch from the upload phase to a Firestore subscription on the
+// new job document.
+
+async function enqueueTransliterationJob(params: {
+  buf: Buffer;
+  filename: string;
+  uid: string;
+  email: string;
+  blobUrl?: string;        // present when client uploaded via Blob first
+}): Promise<{ jobId: string; totalPages: number }> {
+  const { buf, filename, uid, email } = params;
+
+  // Count pages — pdf-lib is the source of truth (more reliable than pdf-parse
+  // on encrypted / weird-font PDFs which we still want to OCR).
+  let totalPages = 0;
+  try {
+    totalPages = (await PDFDocument.load(buf, { ignoreEncryption: true })).getPageCount();
+  } catch (err) {
+    throw new Error(`Could not parse PDF structure: ${err instanceof Error ? err.message : 'unknown'}`);
+  }
+  if (totalPages === 0) throw new Error('PDF has zero pages');
+
+  // Ensure the worker can fetch the buffer over HTTPS. If the client already
+  // uploaded via Blob we have the URL; otherwise upload now.
+  let pdfBlobUrl = params.blobUrl;
+  if (!pdfBlobUrl) {
+    const safeName = filename.replace(/[^\w.\- ]+/g, '_');
+    const blob = await blobPut(`uploads/${uid}/${Date.now()}_${safeName}`, buf, {
+      access: 'public',
+      contentType: 'application/pdf',
+    });
+    pdfBlobUrl = blob.url;
+  }
+
+  // Atomic-ish parent + page docs creation. We accept the race window because
+  // the worker only claims pages with status 'pending' under a transaction.
+  const jobRef = adminDb.collection('transliterationJobs').doc();
+  const jobId = jobRef.id;
+  const now = new Date().toISOString();
+
+  const parent: TransliterationJobDocument = {
+    kind: 'transliteration',
+    uid, email, filename, pdfBlobUrl, totalPages,
+    status: 'pending',
+    pagesCompleted: 0,
+    createdAt: now,
+  };
+  await jobRef.set(parent);
+
+  // Page docs in batches of 500 (Firestore batch limit).
+  const BATCH = 500;
+  for (let start = 0; start < totalPages; start += BATCH) {
+    const batch = adminDb.batch();
+    const end = Math.min(start + BATCH, totalPages);
+    for (let i = start; i < end; i++) {
+      const pageNum = i + 1;
+      const pageRef = jobRef.collection('pages').doc(String(pageNum).padStart(4, '0'));
+      const page: PageJob = {
+        pageNum,
+        status: 'pending',
+        attempts: 0,
+        createdAt: now,
+      };
+      batch.set(pageRef, page);
+    }
+    await batch.commit();
+  }
+
+  return { jobId, totalPages };
+}
+
 // ─── Route handler ─────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
@@ -356,8 +437,38 @@ export async function POST(req: NextRequest) {
 
     let extracted = '';
 
-    // ── PDF: try local text extraction first, fall back to Claude OCR
+    // ── PDF: route into the new transliteration-first pipeline.
+    // The local worker (Claude Max plan) does page-by-page OCR — no API spend,
+    // no Vercel timeout, page-level retries. Client subscribes to
+    // transliterationJobs/{jobId} for live progress.
     if (ext === 'pdf') {
+      try {
+        const { jobId, totalPages } = await enqueueTransliterationJob({
+          buf, filename,
+          uid: authUser.uid, email: authUser.email,
+          blobUrl: blobUrlToCleanup ?? undefined,
+        });
+        // Don't delete the staged blob — the worker needs to fetch from it.
+        blobUrlToCleanup = null;
+        return Response.json({
+          jobId,
+          totalPages,
+          filename,
+          status: 'transliterating',
+          message: `PDF queued — ${totalPages} pages will OCR via local worker.`,
+        });
+      } catch (err) {
+        console.error('[upload] enqueueTransliterationJob failed:', err);
+        return Response.json({
+          error: 'Could not queue this PDF for processing. Please retry.',
+        }, { status: 500 });
+      }
+    }
+
+    // ── Legacy PDF inline-OCR path — kept for reference but unreachable
+    // because the branch above returns. Remove in a follow-up once the new
+    // pipeline is proven on Jay's library.
+    if (ext === '__legacy_pdf_unreachable__') {
       let pdfPages = 0;
 
       // Try local extraction (fast, no API cost, no token limit)

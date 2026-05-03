@@ -731,19 +731,369 @@ Return ONLY the extracted text — no commentary, no notes, no preamble.`;
   }
 }
 
+// ── Transliteration-first pipeline (page-by-page OCR) ───────────────────────
+//
+// New job system. Parent doc lives at `transliterationJobs/{jobId}` with N
+// child page docs at `pages/{0001..N}`. This worker:
+//   1. Claims one pending page at a time (serial for now; bump to 3-concurrent
+//      in a follow-up once we've proven the OAuth path is stable).
+//   2. Downloads the source PDF from Vercel Blob (cached per parent jobId so
+//      we don't re-fetch for every page in a book).
+//   3. Renders just that page to PNG via pdf-to-png-converter.
+//   4. Calls the Agent SDK with an image content block to OCR Gujarati text.
+//   5. Writes text back to the page doc and bumps parent.pagesCompleted.
+//   6. When pagesCompleted === totalPages, transitions parent to assembling →
+//      transliterating → done in pollForTransliterationJobs.
+
+import { Buffer as NodeBuffer } from 'node:buffer';
+import { randomUUID } from 'node:crypto';
+import { writeFileSync, unlinkSync } from 'node:fs';
+import { resolve as resolvePath } from 'node:path';
+import { FieldValue } from 'firebase-admin/firestore';
+
+const WORKER_ID = `worker-${process.pid}-${randomUUID().slice(0, 6)}`;
+const STALE_CLAIM_MS = 10 * 60 * 1000; // 10 min — reaper unclaims pages held this long
+
+// In-memory cache: jobId → Buffer of source PDF. Cleared once the parent
+// transitions out of ocr_running. Each entry sized at the original PDF size
+// (typically <30 MB) so this is bounded by concurrent jobs (1 for now).
+const pdfCache = new Map();
+
+// Lazy-load PROMPT for OCR — kept identical to translate-cli.mjs to match the
+// established formatting contract from the Sethji smoke test.
+const PAGE_OCR_PROMPT = `Extract ALL text from this image of a single PDF page exactly as written. This is a Gujarati text — preserve:
+- All Gujarati Unicode text exactly as it appears
+- All English text exactly
+- All numbers, dates, names, verses
+- Paragraph breaks and structure
+- Any headings, bullet points, or numbered lists
+
+Return ONLY the extracted text — no commentary, no notes, no preamble.`;
+
+let transliteratorSystemPrompt = null;
+async function getTransliteratorSystem() {
+  if (transliteratorSystemPrompt) return transliteratorSystemPrompt;
+  const { execSync } = await import('node:child_process');
+  const script = `import { buildTransliteratorSystem } from '${ROOT}/lib/rules/transliterator-prompt.ts'; console.log(buildTransliteratorSystem());`;
+  transliteratorSystemPrompt = execSync(`npx tsx -e ${JSON.stringify(script)}`, {
+    encoding: 'utf-8', cwd: ROOT, maxBuffer: 5 * 1024 * 1024,
+    env: { ...process.env, ...env },
+  }).trim();
+  return transliteratorSystemPrompt;
+}
+
+async function callClaudeWithImage(system, prompt, base64Png) {
+  // The Agent SDK accepts AsyncIterable<SDKUserMessage> for content arrays.
+  const userMessage = {
+    type: 'user',
+    message: {
+      role: 'user',
+      content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: base64Png } },
+        { type: 'text', text: prompt },
+      ],
+    },
+    parent_tool_use_id: null,
+    session_id: '',
+  };
+  const promptIter = (async function* () { yield userMessage; })();
+  const q = query({
+    prompt: promptIter,
+    options: {
+      systemPrompt: system,
+      model: SONNET,
+      tools: [],
+      maxTurns: 1,
+      cwd: SDK_CWD,
+      permissionMode: 'bypassPermissions',
+    },
+  });
+  let text = '';
+  let errorKind = null;
+  for await (const msg of q) {
+    if (msg.type === 'assistant') {
+      if (msg.error) errorKind = msg.error;
+      for (const block of msg.message.content ?? []) {
+        if (block.type === 'text' && typeof block.text === 'string') text += block.text;
+      }
+    } else if (msg.type === 'result' && msg.subtype !== 'success') {
+      errorKind = errorKind ?? msg.subtype;
+    }
+  }
+  if (errorKind) throw new Error(`Claude SDK error: ${errorKind}`);
+  if (!text.trim()) throw new Error('Empty response from Claude SDK');
+  return text;
+}
+
+async function getPdfBuffer(jobId, blobUrl) {
+  const cached = pdfCache.get(jobId);
+  if (cached) return cached;
+  const res = await fetch(blobUrl);
+  if (!res.ok) throw new Error(`Blob fetch ${res.status} for ${blobUrl}`);
+  const buf = NodeBuffer.from(await res.arrayBuffer());
+  pdfCache.set(jobId, buf);
+  return buf;
+}
+
+async function renderPageToPng(pdfBuf, pageNum) {
+  // pdf-to-png-converter is heavy (loads canvas + pdfjs). Lazy-load.
+  const { pdfToPng } = await import('pdf-to-png-converter');
+  const tmpPath = resolvePath(tmpdir(), `aksharpith-${WORKER_ID}-page-${pageNum}-${Date.now()}.pdf`);
+  writeFileSync(tmpPath, pdfBuf);
+  try {
+    const pages = await pdfToPng(tmpPath, {
+      pagesToProcess: [pageNum], // 1-indexed
+      viewportScale: 2.0,        // 2x for better OCR fidelity on small text
+      outputFolder: undefined,    // keep in memory
+      strictPagesToProcess: true,
+    });
+    if (!pages.length) throw new Error(`No PNG returned for page ${pageNum}`);
+    return pages[0].content; // Buffer of PNG bytes
+  } finally {
+    try { unlinkSync(tmpPath); } catch { /* ok */ }
+  }
+}
+
+async function pollForPageJobs() {
+  if (processing) return; // serialise with translation jobs for now
+  try {
+    // Reaper: unclaim pages whose claim has gone stale.
+    const stale = await db.collectionGroup('pages')
+      .where('status', '==', 'ocr_running')
+      .where('claimedAt', '<', new Date(Date.now() - STALE_CLAIM_MS).toISOString())
+      .limit(5).get();
+    for (const doc of stale.docs) {
+      await doc.ref.update({ status: 'pending', claimedBy: null, claimedAt: null });
+      console.log(`[worker] Reaped stale claim on ${doc.ref.path}`);
+    }
+
+    // Pick one pending page with attempts < 3.
+    const snapshot = await db.collectionGroup('pages')
+      .where('status', '==', 'pending')
+      .where('attempts', '<', 3)
+      .orderBy('attempts').orderBy('createdAt')
+      .limit(1).get();
+    if (snapshot.empty) return;
+
+    processing = true;
+    const pageRef = snapshot.docs[0].ref;
+    const parentRef = pageRef.parent.parent;
+    if (!parentRef) { processing = false; return; }
+
+    // Claim via transaction.
+    const { pageNum, parent } = await db.runTransaction(async (tx) => {
+      const fresh = await tx.get(pageRef);
+      if (!fresh.exists || fresh.data().status !== 'pending') {
+        throw new Error('Already claimed');
+      }
+      const now = new Date().toISOString();
+      tx.update(pageRef, {
+        status: 'ocr_running',
+        claimedBy: WORKER_ID,
+        claimedAt: now,
+        attempts: FieldValue.increment(1),
+      });
+      const parentSnap = await tx.get(parentRef);
+      // First page claim flips parent from pending → ocr_running.
+      if (parentSnap.exists && parentSnap.data().status === 'pending') {
+        tx.update(parentRef, { status: 'ocr_running', startedAt: now });
+      }
+      return { pageNum: fresh.data().pageNum, parent: parentSnap.data() };
+    }).catch((err) => {
+      if (err.message === 'Already claimed') return null;
+      throw err;
+    });
+
+    if (!pageNum) { processing = false; return; }
+
+    console.log(`\n[worker] OCR page ${pageNum}/${parent.totalPages} of ${parent.filename}`);
+
+    try {
+      const pdfBuf = await getPdfBuffer(parentRef.id, parent.pdfBlobUrl);
+      const pngBuf = await renderPageToPng(pdfBuf, pageNum);
+      const text = await callClaudeWithImage(
+        'You are an OCR engine. Extract text from images preserving all original formatting and language scripts (especially Gujarati).',
+        PAGE_OCR_PROMPT,
+        pngBuf.toString('base64'),
+      );
+      const cleaned = text.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+      const wordCount = cleaned.split(/\s+/).filter(Boolean).length;
+
+      await pageRef.update({
+        status: 'ocr_done',
+        gujaratiText: cleaned,
+        wordCount,
+        completedAt: new Date().toISOString(),
+        error: null,
+      });
+      await parentRef.update({ pagesCompleted: FieldValue.increment(1) });
+      console.log(`  ✓ page ${pageNum} → ${wordCount} words`);
+    } catch (err) {
+      console.error(`  ✗ page ${pageNum} failed: ${err.message}`);
+      // attempts was already incremented at claim time. Mark failed if cap hit.
+      const fresh = await pageRef.get();
+      const attempts = fresh.data()?.attempts ?? 3;
+      await pageRef.update({
+        status: attempts >= 3 ? 'ocr_failed' : 'pending',
+        claimedBy: null,
+        claimedAt: null,
+        error: err.message?.slice(0, 500) ?? 'Unknown OCR error',
+      });
+      if (attempts >= 3) {
+        await parentRef.update({
+          status: 'failed',
+          error: `Page ${pageNum} OCR failed after 3 attempts: ${err.message?.slice(0, 200)}`,
+          completedAt: new Date().toISOString(),
+        });
+        pdfCache.delete(parentRef.id);
+      }
+    } finally {
+      processing = false;
+    }
+  } catch (err) {
+    console.error('[worker] Page-poll error:', err.message);
+    processing = false;
+  }
+}
+
+async function pollForTransliterationJobs() {
+  if (processing) return;
+  try {
+    // Find a parent whose pages are all done but the transliterator hasn't
+    // run yet. Status will be 'ocr_running' (set when first page was claimed).
+    const ready = await db.collection('transliterationJobs')
+      .where('status', '==', 'ocr_running')
+      .limit(5).get();
+    if (ready.empty) {
+      // Also pick up jobs awaiting optional translation.
+      const transReady = await db.collection('transliterationJobs')
+        .where('translateRequested', '==', true)
+        .where('translationStatus', '==', 'pending')
+        .limit(1).get();
+      if (transReady.empty) return;
+      processing = true;
+      await processTranslationStage(transReady.docs[0]);
+      processing = false;
+      return;
+    }
+
+    // Find the first parent where pagesCompleted === totalPages.
+    const candidate = ready.docs.find(d => {
+      const data = d.data();
+      return data.pagesCompleted >= data.totalPages;
+    });
+    if (!candidate) return;
+
+    processing = true;
+    try {
+      await processTransliterationStage(candidate);
+    } finally {
+      processing = false;
+    }
+  } catch (err) {
+    console.error('[worker] Transliteration-poll error:', err.message);
+    processing = false;
+  }
+}
+
+async function processTransliterationStage(parentDoc) {
+  const parentRef = parentDoc.ref;
+  const parent = parentDoc.data();
+  console.log(`\n[worker] Transliterating ${parent.filename} (${parent.totalPages} pages)`);
+
+  await parentRef.update({ status: 'assembling' });
+
+  // Read all page docs in pageNum order, assemble Gujarati.
+  const pagesSnap = await parentRef.collection('pages').orderBy('pageNum').get();
+  const assembled = pagesSnap.docs
+    .map(d => d.data().gujaratiText ?? '')
+    .filter(Boolean)
+    .join('\n\n');
+  await parentRef.update({ gujaratiOutput: assembled, status: 'transliterating' });
+
+  // Run the transliterator stage (verse-aware chunker → transliterator → ā-only enforcer).
+  // For MVP: single SDK call with the assembled text. Chunking is handled by
+  // the existing pipeline.ts in PR #2 — for now feed the whole text in one call,
+  // accepting that very long books may need splitting later.
+  try {
+    const system = await getTransliteratorSystem();
+    const userPrompt = `Transliterate the following Gujarati passage into Roman script per the rules above. Output ONLY <transliteration>…</transliteration>.\n\nGUJARATI:\n${assembled}`;
+    const raw = await callClaude({
+      model: SONNET, max_tokens: 16_000,
+      system,
+      messages: [{ role: 'user', content: userPrompt }],
+    });
+    // Extract <transliteration> block.
+    const match = raw.match(/<transliteration>([\s\S]*?)<\/transliteration>/);
+    if (!match) throw new Error('Transliterator did not return <transliteration> block');
+    const translit = match[1].trim();
+
+    await parentRef.update({
+      transliteratedOutput: translit,
+      status: 'done',
+      completedAt: new Date().toISOString(),
+    });
+    pdfCache.delete(parentRef.id);
+    console.log(`  ✓ transliteration complete — ${translit.split(/\s+/).length} words`);
+  } catch (err) {
+    console.error(`[worker] Transliteration failed: ${err.message}`);
+    await parentRef.update({
+      status: 'failed',
+      error: `Transliteration: ${err.message?.slice(0, 200)}`,
+      completedAt: new Date().toISOString(),
+    });
+    pdfCache.delete(parentRef.id);
+  }
+}
+
+async function processTranslationStage(parentDoc) {
+  const parentRef = parentDoc.ref;
+  const parent = parentDoc.data();
+  console.log(`\n[worker] Translating ${parent.filename} (optional secondary stage)`);
+
+  await parentRef.update({ translationStatus: 'running' });
+  try {
+    // Reuse the canonical translator+smoother chain on the assembled Gujarati.
+    // For MVP do a single chunk; the full chunked pipeline lives in pipeline.ts
+    // and will be wired in PR #2.
+    const raw = await callClaude({
+      model: SONNET, max_tokens: 16_000,
+      system: TRANSLATOR_SYSTEM,
+      messages: [{ role: 'user', content: `Translate the following Gujarati text into English following the rules above. Output ONLY <translation>…</translation><flags>…</flags>.\n\nGUJARATI:\n${parent.gujaratiOutput}` }],
+    });
+    const tMatch = raw.match(/<translation>([\s\S]*?)<\/translation>/);
+    if (!tMatch) throw new Error('Translator did not return <translation> block');
+    await parentRef.update({
+      translationOutput: tMatch[1].trim(),
+      translationStatus: 'done',
+    });
+    console.log('  ✓ translation complete');
+  } catch (err) {
+    console.error(`[worker] Translation failed: ${err.message}`);
+    await parentRef.update({
+      translationStatus: 'failed',
+      translationError: err.message?.slice(0, 200) ?? 'Unknown',
+    });
+  }
+}
+
 // ── Start ────────────────────────────────────────────────────────────────────
 
 console.log('[worker] Aksharpith local worker started (using claude CLI — Max subscription)');
-console.log(`[worker] Polling Firestore every ${POLL_INTERVAL / 1000}s for jobs + extractions...`);
+console.log(`[worker] Worker id: ${WORKER_ID}`);
+console.log(`[worker] Polling Firestore every ${POLL_INTERVAL / 1000}s for jobs + extractions + transliterations...`);
 
 // Initial poll
 pollForJobs();
 
-// Continuous polling — alternate between jobs and extractions
+// Continuous polling — round-robin across the four queues.
 let pollCycle = 0;
 setInterval(() => {
-  if (pollCycle % 2 === 0) pollForJobs();
-  else pollForExtractions();
+  const phase = pollCycle % 4;
+  if (phase === 0) pollForJobs();
+  else if (phase === 1) pollForExtractions();
+  else if (phase === 2) pollForPageJobs();
+  else pollForTransliterationJobs();
   pollCycle++;
 }, POLL_INTERVAL);
 

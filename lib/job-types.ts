@@ -71,3 +71,75 @@ export interface JobProgressUpdate {
 }
 
 export type ProgressReporter = (update: JobProgressUpdate) => Promise<void>;
+
+// ─── Transliteration-first pipeline (page-by-page) ──────────────────────────
+//
+// Aksharpith's primary product is a Roman-script transliteration of a Gujarati
+// document. Translation to English is an optional secondary stage triggered by
+// the user from the transliteration view.
+//
+// Big PDFs are processed page-by-page: one Sonnet vision call per page, max 3
+// in flight, full text assembled at the end. The existing verse-aware chunker
+// then runs over the assembled Gujarati to produce semantic chunks for the
+// transliterator (and optionally the translator).
+
+export type PageStatus = 'pending' | 'ocr_running' | 'ocr_done' | 'ocr_failed';
+
+export interface PageJob {
+  pageNum: number;                  // 1-indexed page number in the source PDF
+  status: PageStatus;
+  attempts: number;                 // OCR retry counter, capped at 3
+  claimedBy?: string;               // worker process id holding the lock
+  claimedAt?: string;               // ISO — for stale-claim reaper
+  gujaratiText?: string;            // populated when status = 'ocr_done'
+  wordCount?: number;
+  error?: string;
+  createdAt: string;
+  completedAt?: string;
+}
+
+export type TransliterationJobStatus =
+  | 'pending'         // parent created, no pages claimed yet
+  | 'ocr_running'     // at least one page in flight
+  | 'assembling'      // all pages done, joining text
+  | 'transliterating' // running chunker → transliterator → enforcer
+  | 'done'            // transliteration complete; translation may be pending
+  | 'failed';         // unrecoverable — see `error`
+
+export type TranslationStatus = 'idle' | 'pending' | 'running' | 'done' | 'failed';
+
+export interface TransliterationJobDocument {
+  /** Discriminator vs `JobDocument` (legacy translation-only jobs). */
+  kind: 'transliteration';
+
+  uid: string;
+  email: string;
+
+  // Source
+  filename: string;
+  /** Vercel Blob URL for the original PDF (only for PDF inputs). */
+  pdfBlobUrl?: string;
+  /** Inline source text — populated for paste / .txt / .docx inputs (no OCR). */
+  pasteText?: string;
+  totalPages: number;               // 1 for non-PDF inputs
+
+  // Parent state
+  status: TransliterationJobStatus;
+  pagesCompleted: number;
+  createdAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  error?: string;
+
+  // Outputs
+  /** Assembled Gujarati after all pages OCR'd and joined. */
+  gujaratiOutput?: string;
+  /** Primary product — Roman transliteration with ā-only diacritics. */
+  transliteratedOutput?: string;
+
+  // Optional secondary translation stage
+  translateRequested?: boolean;
+  translationStatus?: TranslationStatus;
+  translationOutput?: string;
+  translationError?: string;
+}

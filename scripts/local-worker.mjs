@@ -857,21 +857,26 @@ async function renderPageToPng(pdfBuf, pageNum) {
 async function pollForPageJobs() {
   if (processing) return; // serialise with translation jobs for now
   try {
-    // Reaper: unclaim pages whose claim has gone stale.
-    const stale = await db.collectionGroup('pages')
+    // Reaper: unclaim pages whose ocr_running claim has gone stale. Single-
+    // field query (status only) — composite index not required. We filter the
+    // staleness threshold client-side, which is fine at this scale.
+    const staleSnap = await db.collectionGroup('pages')
       .where('status', '==', 'ocr_running')
-      .where('claimedAt', '<', new Date(Date.now() - STALE_CLAIM_MS).toISOString())
-      .limit(5).get();
-    for (const doc of stale.docs) {
-      await doc.ref.update({ status: 'pending', claimedBy: null, claimedAt: null });
-      console.log(`[worker] Reaped stale claim on ${doc.ref.path}`);
+      .limit(20).get();
+    const staleCutoff = new Date(Date.now() - STALE_CLAIM_MS).toISOString();
+    for (const doc of staleSnap.docs) {
+      const claimedAt = doc.data().claimedAt;
+      if (claimedAt && claimedAt < staleCutoff) {
+        await doc.ref.update({ status: 'pending', claimedBy: null, claimedAt: null });
+        console.log(`[worker] Reaped stale claim on ${doc.ref.path}`);
+      }
     }
 
-    // Pick one pending page with attempts < 3.
+    // Pick one pending page. Single-field query — composite index not
+    // required. The `attempts < 3` cap is enforced inside the claim
+    // transaction below (re-read the doc, abort if exhausted).
     const snapshot = await db.collectionGroup('pages')
       .where('status', '==', 'pending')
-      .where('attempts', '<', 3)
-      .orderBy('attempts').orderBy('createdAt')
       .limit(1).get();
     if (snapshot.empty) return;
 
@@ -880,11 +885,18 @@ async function pollForPageJobs() {
     const parentRef = pageRef.parent.parent;
     if (!parentRef) { processing = false; return; }
 
-    // Claim via transaction.
+    // Claim via transaction. Enforce attempts cap here so the picker query
+    // can stay single-field (no composite index required).
     const { pageNum, parent } = await db.runTransaction(async (tx) => {
       const fresh = await tx.get(pageRef);
       if (!fresh.exists || fresh.data().status !== 'pending') {
         throw new Error('Already claimed');
+      }
+      if ((fresh.data().attempts ?? 0) >= 3) {
+        // Should have been marked failed already; flip it now to stop the
+        // picker from looping on it.
+        tx.update(pageRef, { status: 'ocr_failed' });
+        throw new Error('Attempts exhausted');
       }
       const now = new Date().toISOString();
       tx.update(pageRef, {
@@ -900,7 +912,7 @@ async function pollForPageJobs() {
       }
       return { pageNum: fresh.data().pageNum, parent: parentSnap.data() };
     }).catch((err) => {
-      if (err.message === 'Already claimed') return null;
+      if (err.message === 'Already claimed' || err.message === 'Attempts exhausted') return null;
       throw err;
     });
 
@@ -965,15 +977,16 @@ async function pollForTransliterationJobs() {
       .where('status', '==', 'ocr_running')
       .limit(5).get();
     if (ready.empty) {
-      // Also pick up jobs awaiting optional translation.
+      // Also pick up jobs awaiting optional translation. Single-field query —
+      // composite index not required. Filter the secondary condition client-
+      // side from the small result set.
       const transReady = await db.collection('transliterationJobs')
         .where('translateRequested', '==', true)
-        .where('translationStatus', '==', 'pending')
-        .limit(1).get();
-      if (transReady.empty) return;
+        .limit(20).get();
+      const candidate = transReady.docs.find(d => d.data().translationStatus === 'pending');
+      if (!candidate) return;
       processing = true;
-      await processTranslationStage(transReady.docs[0]);
-      processing = false;
+      try { await processTranslationStage(candidate); } finally { processing = false; }
       return;
     }
 

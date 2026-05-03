@@ -1,22 +1,101 @@
-# Aksharpith Translator — System Architecture
+# Aksharpith — System Architecture
 
 ```
-    A K S H A R P I T H   T R A N S L A T O R
-    ───────────────────────────────────────────
-    Six-stage agentic pipeline for publication-ready
-    Gujarati-to-English translation of sacred texts
+    A K S H A R P I T H
+    ──────────────────────────────────────────────
+    Page-by-page Gujarati transliteration pipeline
+    with optional English translation
+    (Sacred BAPS Swaminarayan corpus)
 
     Trustee of Tradition. Guardian of Accuracy.
 ```
 
-> **Mission:** Translate the Swaminarayan Sampraday's Gujarati sacred literature into
-> publication-quality English with the reverence, precision, and consistency that
-> Aksharpith's editorial standards demand -- and do it in minutes, not months.
+> **Mission:** Render the Swaminarayan Sampraday's Gujarati sacred literature into
+> publication-quality Roman-script transliteration (with optional English translation)
+> at Aksharpith's editorial standards — and do it in minutes, not months.
 
-> **Philosophy:** The pipeline is designed as a *trustee of tradition*, not a creative
+> **Philosophy:** The pipeline is a *trustee of tradition*, not a creative
 > interpreter. Every architectural decision prioritises **fidelity to source**,
 > **terminological exactness**, and **deterministic enforcement** of house rules.
-> LLMs translate and review; deterministic code has the final word.
+> LLMs transliterate, translate, and smooth; deterministic code has the final word.
+
+---
+
+## 0. Transliteration-First Pipeline (May 2026 pivot)
+
+The current primary product is **Roman-script transliteration** of Gujarati input
+(with the ā-only diacritic rule from House Rules §2.2). English translation became
+an *optional secondary stage* triggered from the transliteration view.
+
+Big PDFs are processed **page-by-page**: each PDF page is its own OCR unit, claimed
+by the local worker via Firestore transactions. This eliminates the multi-page-chunk
+throttling the OAuth/Max-plan path exhibited under sustained load.
+
+### Flow
+
+```mermaid
+flowchart TD
+  U[User: paste text or upload PDF/image] --> UR[POST /api/upload]
+  UR -->|PDF| BLOB[(Vercel Blob<br/>uploads/uid/...)]
+  UR -->|PDF| TJ[(Firestore<br/>transliterationJobs/jobId)]
+  TJ --> PG[(pages/0001..N<br/>pending -> ocr_running -> ocr_done)]
+
+  W[Local worker<br/>Claude Max via Agent SDK] -->|claim page via tx| PG
+  W -->|render PNG via pdf-to-png-converter| OCR[Claude Sonnet vision OCR]
+  OCR --> PG
+
+  PG -->|all pages done| AS[Assemble Gujarati]
+  AS --> CHUNK[Verse-aware chunker]
+  CHUNK --> TR[Transliterator<br/>Sonnet + a-only enforcer]
+  TR --> OUT[transliteratedOutput]
+
+  OUT -.->|user clicks Translate| TX[Translator + Smoother<br/>Sonnet, full rules]
+  TX --> ENOUT[translationOutput]
+
+  OUT --> DOCX[Outputs: .txt + .docx]
+  ENOUT --> DOCX
+```
+
+### Job lifecycle
+
+```
+pending -> ocr_running -> assembling -> transliterating -> done
+                                                          (user opt-in)
+                                                  translating -> done
+```
+
+If any page exhausts its retry cap (3), the parent transitions to `failed` and
+no further pages are claimed. The user's UI (`/transliterate/[jobId]`) subscribes
+to the parent and pages subcollections in real time, rendering a colour-coded
+chip rail (one chip per page) plus the assembled outputs as they land.
+
+### Constraints honoured
+
+- **Free tier only** — Vercel Blob (no Anthropic API spend), Claude Max plan via
+  the Agent SDK (OAuth token, not API key), Firebase Spark for auth + Firestore.
+- **Single-field Firestore queries** — collection-group queries on the pages
+  subcollection require index exemptions Firebase doesn't auto-create, so the
+  worker queries active parents first and walks each parent's pages subcollection
+  directly (auto-indexed).
+- **Atomic page claims** — each claim is a single Firestore transaction (parallel
+  reads of page + parent, then writes). Stale claims (>10 min) reaped on next poll.
+
+### Files
+
+| Concern | Path |
+|---|---|
+| Job + page types | `lib/job-types.ts` (`TransliterationJobDocument`, `PageJob`) |
+| Upload / job creation | `app/api/upload/route.ts::enqueueTransliterationJob` |
+| Worker pollers | `scripts/local-worker.mjs::pollForPageJobs`, `pollForTransliterationJobs` |
+| Transliterator prompt | `lib/rules/transliterator-prompt.ts` |
+| Transliterator pipeline | `lib/pipeline.ts::runTransliterationPipeline` |
+| UI | `app/transliterate/[jobId]/page.tsx` |
+| Admin observability | `app/admin/page.tsx::TransliterationFeed` |
+| Firestore rules | `firestore.rules` |
+
+The detailed legacy translation pipeline (paste-text flow) is documented in
+sections 1–N below and remains operational. PDFs route exclusively through the
+transliteration-first flow above.
 
 ---
 

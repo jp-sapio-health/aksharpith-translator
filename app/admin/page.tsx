@@ -8,6 +8,7 @@ import { isAdminEmail } from '../../lib/admins';
 import { getFirebaseDb } from '../../lib/firebase';
 import { Button } from '../../components/ui/button';
 import { cn } from '../../lib/utils';
+import type { TransliterationJobDocument } from '../../lib/job-types';
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -145,7 +146,7 @@ function AdminFeed() {
             <h1 className="font-serif text-xl text-foreground">Aksharpith — Admin</h1>
             <p className="text-xs text-muted-foreground mt-0.5">Live pipeline observer</p>
           </div>
-          <a href="/" className="text-xs text-muted-foreground hover:text-foreground">← back to translator</a>
+          <a href="/" className="text-xs text-muted-foreground hover:text-foreground">← back to Aksharpith</a>
         </div>
       </header>
 
@@ -158,10 +159,11 @@ function AdminFeed() {
 
         <StatsLine stats={stats} />
 
-        <ol className="mt-6 space-y-2">
+        <h2 className="mt-6 mb-2 text-xs uppercase tracking-wider font-mono text-muted-foreground">Translation jobs (legacy paste flow)</h2>
+        <ol className="space-y-2">
           {jobs.length === 0 ? (
             <li className="rounded-md border bg-paper px-4 py-6 text-center text-sm text-muted-foreground">
-              No jobs yet.
+              No translation jobs yet.
             </li>
           ) : (
             jobs.map((job) => (
@@ -174,8 +176,107 @@ function AdminFeed() {
             ))
           )}
         </ol>
+
+        <h2 className="mt-10 mb-2 text-xs uppercase tracking-wider font-mono text-muted-foreground">Transliteration jobs (page-by-page PDF flow)</h2>
+        <TransliterationFeed />
       </main>
     </div>
+  );
+}
+
+// ── Transliteration feed (new) ──────────────────────────────────────────────
+//
+// Subscribes to transliterationJobs/* and renders one row per job with
+// page-completion ratio, status pill, and a link to /transliterate/{id} for
+// full live progress. Admins see all users' jobs (Firestore rules permit it).
+
+interface TransliterationJobRow extends TransliterationJobDocument {
+  id: string;
+}
+
+function TransliterationFeed() {
+  const [jobs, setJobs] = useState<TransliterationJobRow[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const db = getFirebaseDb();
+    const q = query(collection(db, 'transliterationJobs'), orderBy('createdAt', 'desc'));
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        const next: TransliterationJobRow[] = [];
+        snap.forEach((d) => next.push({ id: d.id, ...(d.data() as TransliterationJobDocument) }));
+        setJobs(next);
+      },
+      (err) => setError(err.message),
+    );
+    return unsub;
+  }, []);
+
+  if (error) {
+    return <p className="text-xs text-destructive">{error}</p>;
+  }
+
+  if (jobs.length === 0) {
+    return (
+      <div className="rounded-md border bg-paper px-4 py-6 text-center text-sm text-muted-foreground">
+        No transliteration jobs yet.
+      </div>
+    );
+  }
+
+  return (
+    <ol className="space-y-2">
+      {jobs.map((job) => {
+        const pct = job.totalPages > 0 ? Math.round((job.pagesCompleted / job.totalPages) * 100) : 0;
+        const statusTone =
+          job.status === 'done' ? 'text-[oklch(0.42_0.07_145)]' :
+          job.status === 'failed' ? 'text-destructive' :
+          'text-[oklch(0.45_0.10_75)]';
+        return (
+          <li key={job.id} className="rounded-md border bg-paper">
+            <a
+              href={`/transliterate/${job.id}`}
+              className="flex items-center gap-3 px-4 py-3 hover:bg-stone-50 transition-colors"
+            >
+              <div className="flex-1 min-w-0">
+                <div className="flex items-baseline gap-2">
+                  <span className="font-serif text-sm text-foreground truncate">{job.filename}</span>
+                  <span className="text-[10px] text-muted-foreground tabular-nums">{job.email}</span>
+                </div>
+                <div className="text-xs text-muted-foreground mt-0.5 flex items-center gap-2">
+                  <span className="tabular-nums">{job.pagesCompleted}/{job.totalPages} pages</span>
+                  <span>·</span>
+                  <span>{new Date(job.createdAt).toLocaleString('en-GB', { dateStyle: 'short', timeStyle: 'short' })}</span>
+                  {job.translateRequested && (
+                    <>
+                      <span>·</span>
+                      <span>EN {job.translationStatus ?? 'pending'}</span>
+                    </>
+                  )}
+                </div>
+                {/* Mini progress bar */}
+                <div className="mt-1.5 h-1 w-full bg-stone-200 rounded-full overflow-hidden">
+                  <div
+                    className={cn(
+                      'h-full transition-all',
+                      job.status === 'failed' ? 'bg-destructive' : 'bg-amber-600',
+                    )}
+                    style={{ width: `${pct}%` }}
+                  />
+                </div>
+              </div>
+              <span className={cn('text-[10px] uppercase tracking-wider font-mono', statusTone)}>
+                {job.status}
+              </span>
+            </a>
+            {job.error && (
+              <p className="px-4 pb-2 text-xs text-destructive">{job.error}</p>
+            )}
+          </li>
+        );
+      })}
+    </ol>
   );
 }
 

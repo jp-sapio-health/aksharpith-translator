@@ -1109,7 +1109,7 @@ function HomeInner() {
                 Aksharpith
               </div>
               <div className="font-serif text-xl text-foreground leading-tight">
-                Translation <em className="italic font-normal">Pipeline</em>
+                Transliteration <em className="italic font-normal">Pipeline</em>
               </div>
             </div>
           </div>

@@ -14,8 +14,8 @@ const cormorant = Cormorant_Garamond({
 });
 
 export const metadata: Metadata = {
-  title: 'Aksharpith Translation Pipeline',
-  description: 'Gujarati to English AI translation pipeline — Aksharpith house style',
+  title: 'Aksharpith — Transliteration & Translation',
+  description: 'Gujarati transliteration pipeline (page-by-page OCR) with optional English translation — Aksharpith house style',
   icons: {
     icon: '/favicon.ico',
     apple: '/apple-icon.png',

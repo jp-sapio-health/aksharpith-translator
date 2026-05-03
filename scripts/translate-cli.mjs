@@ -150,7 +150,7 @@ const PDF_OCR_PROMPT = `Extract ALL text from this PDF document exactly as writt
 
 Return ONLY the extracted text — no commentary, no notes, no preamble.`;
 
-const PAGES_PER_OCR_CHUNK = 30;
+const PAGES_PER_OCR_CHUNK = 10;
 
 async function splitPdfIntoChunks(buf, pagesPerChunk) {
   const { PDFDocument } = await import('pdf-lib');
@@ -225,8 +225,12 @@ if (ext === '.txt') {
   const buf = readFileSync(absPath);
 
   // Step 1: try pdf-parse (fast, free, works for text-PDFs).
+  // NB: import the inner module directly. `pdf-parse`'s index.js has a debug
+  // shim (`if (!module.parent)`) that runs `Fs.readFileSync('./test/data/...')`
+  // at import time under ESM, throws ENOENT, and silently pushes EVERY
+  // text-PDF onto the OCR path. Importing the parser directly avoids it.
   try {
-    const { default: pdfParse } = await import('pdf-parse');
+    const { default: pdfParse } = await import('pdf-parse/lib/pdf-parse.js');
     const parsed = await pdfParse(buf);
     const localText = parsed.text.replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
     const indic = (localText.match(/[઀-૿ऀ-ॿ]/g) ?? []).length;
@@ -234,7 +238,9 @@ if (ext === '.txt') {
       text = localText;
       console.log(`PDF text extracted via pdf-parse (${parsed.numpages} pages, no OCR needed)`);
     }
-  } catch { /* fall through to OCR */ }
+  } catch (e) {
+    console.error(`  pdf-parse failed (${e.message}); falling back to OCR`);
+  }
 
   // Step 2: image-only PDF — Claude vision OCR via the SDK.
   if (!text) {

@@ -8,3 +8,4 @@ out/
 .vercel
 logs/
 extractions/
+scripts/_*.mjs

@@ -886,13 +886,16 @@ async function pollForPageJobs() {
       }
     }
 
-    // Pick the first pending page across active parents.
+    // Pick a pending page across active parents. Order is unimportant —
+    // pages are independent OCR units; the UI sorts by pageNum on render.
+    // Skipping orderBy() avoids Firebase requiring a composite index on
+    // (status, pageNum). Doc ID lexicographic order from the picker matches
+    // pageNum order anyway because we pad pageNum with zeros at create time.
     let pageRef = null;
     let parentRef = null;
     for (const parent of activeParents) {
       const snap = await parent.ref.collection('pages')
         .where('status', '==', 'pending')
-        .orderBy('pageNum')
         .limit(1).get();
       if (!snap.empty) {
         pageRef = snap.docs[0].ref;
@@ -904,16 +907,14 @@ async function pollForPageJobs() {
 
     processing = true;
 
-    // Claim via transaction. Enforce attempts cap here so the picker query
-    // can stay single-field (no composite index required).
+    // Claim via transaction. Firestore requires all reads before writes, so
+    // we get both docs first, decide what to do, then write.
     const { pageNum, parent } = await db.runTransaction(async (tx) => {
-      const fresh = await tx.get(pageRef);
+      const [fresh, parentSnap] = await Promise.all([tx.get(pageRef), tx.get(parentRef)]);
       if (!fresh.exists || fresh.data().status !== 'pending') {
         throw new Error('Already claimed');
       }
       if ((fresh.data().attempts ?? 0) >= 3) {
-        // Should have been marked failed already; flip it now to stop the
-        // picker from looping on it.
         tx.update(pageRef, { status: 'ocr_failed' });
         throw new Error('Attempts exhausted');
       }
@@ -924,7 +925,6 @@ async function pollForPageJobs() {
         claimedAt: now,
         attempts: FieldValue.increment(1),
       });
-      const parentSnap = await tx.get(parentRef);
       // First page claim flips parent from pending → ocr_running.
       if (parentSnap.exists && parentSnap.data().status === 'pending') {
         tx.update(parentRef, { status: 'ocr_running', startedAt: now });

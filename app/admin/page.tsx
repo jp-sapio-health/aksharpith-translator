@@ -284,9 +284,11 @@ function TransliterationFeed({
   }, []);
 
   // Worker heartbeat + oldest pending — derived from the live snapshot.
+  // The schema has no `updatedAt` on the parent doc, so we use the latest
+  // of completedAt / startedAt / createdAt as the activity proxy.
   const heartbeat = useMemo(() => {
     const lastUpdate = jobs
-      .map((j) => j.updatedAt ?? '')
+      .map((j) => j.completedAt ?? j.startedAt ?? j.createdAt ?? '')
       .filter(Boolean)
       .sort()
       .pop();

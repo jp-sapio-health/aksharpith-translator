@@ -39,7 +39,6 @@ export async function GET(req: Request) {
         translateRequested: d.translateRequested ?? false,
         translationStatus: d.translationStatus ?? null,
         createdAt: d.createdAt ?? null,
-        updatedAt: d.updatedAt ?? null,
         startedAt: d.startedAt ?? null,
         completedAt: d.completedAt ?? null,
         error: d.error ?? null,
@@ -73,13 +72,15 @@ export async function GET(req: Request) {
         .filter((t): t is string => Boolean(t))
         .sort()[0] ?? null;
 
-    // Worker heartbeat — most recent updatedAt across all running/done jobs.
+    // Worker heartbeat — most recent completedAt across all jobs (the
+    // schema has no updatedAt; completedAt is the latest write the worker
+    // makes when it finishes a job).
     const recent = await adminDb
       .collection('transliterationJobs')
-      .orderBy('updatedAt', 'desc')
+      .orderBy('completedAt', 'desc')
       .limit(1)
       .get();
-    const lastWorkerActivityIso = recent.docs[0]?.data().updatedAt ?? null;
+    const lastWorkerActivityIso = recent.docs[0]?.data().completedAt ?? null;
 
     return NextResponse.json({ items, counts, oldestPendingIso, lastWorkerActivityIso });
   } catch (err) {

@@ -382,36 +382,47 @@ function TransliterationFeed({
             {job.error && (
               <p className="px-4 pb-2 text-xs text-destructive">{job.error}</p>
             )}
-            {/* Action row — only show when actions are meaningful. */}
-            {(job.status === 'pending' || job.status === 'running' || job.status === 'failed' || job.status === 'cancelled') && (
-              <div className="flex items-center gap-1.5 px-4 pb-3">
-                {job.status === 'pending' && (
+            {/* Action row — TransliterationJobStatus is a tight enum but
+                admin actions also yield 'cancelled'; cast to string so
+                comparisons aren't narrowed away. In-flight covers the
+                three middle worker states. */}
+            {(() => {
+              const s = job.status as string;
+              const inFlight =
+                s === 'ocr_running' || s === 'assembling' || s === 'transliterating';
+              const showActions =
+                s === 'pending' || inFlight || s === 'failed' || s === 'cancelled';
+              if (!showActions) return null;
+              return (
+                <div className="flex items-center gap-1.5 px-4 pb-3">
+                  {s === 'pending' && (
+                    <ActionButton
+                      tone="neutral"
+                      disabled={acting === job.id}
+                      onClick={() => onAction(job.id, 'cancel')}
+                    >
+                      Cancel
+                    </ActionButton>
+                  )}
+                  {inFlight && (
+                    <ActionButton
+                      tone="warn"
+                      disabled={acting === job.id}
+                      onClick={() => onAction(job.id, 'force-fail')}
+                    >
+                      Force-fail
+                    </ActionButton>
+                  )}
                   <ActionButton
-                    tone="neutral"
+                    tone="danger"
                     disabled={acting === job.id}
-                    onClick={() => onAction(job.id, 'cancel')}
+                    onClick={() => onAction(job.id, 'delete')}
                   >
-                    Cancel
+                    Delete
                   </ActionButton>
-                )}
-                {job.status === 'running' && (
-                  <ActionButton
-                    tone="warn"
-                    disabled={acting === job.id}
-                    onClick={() => onAction(job.id, 'force-fail')}
-                  >
-                    Force-fail
-                  </ActionButton>
-                )}
-                <ActionButton
-                  tone="danger"
-                  disabled={acting === job.id}
-                  onClick={() => onAction(job.id, 'delete')}
-                >
-                  Delete
-                </ActionButton>
-              </div>
-            )}
+                </div>
+              );
+            })()}
           </li>
         );
       })}
@@ -524,12 +535,12 @@ function JobRow({
           the main row stays a single toggle. */}
       {expanded && (
         <div className="flex items-center gap-1.5 px-4 pb-3">
-          {job.status === 'pending' && (
+          {(job.status as string) === 'pending' && (
             <ActionButton tone="neutral" disabled={acting} onClick={() => onAction('cancel')}>
               Cancel
             </ActionButton>
           )}
-          {job.status === 'running' && (
+          {(job.status as string) === 'running' && (
             <ActionButton tone="warn" disabled={acting} onClick={() => onAction('force-fail')}>
               Force-fail
             </ActionButton>

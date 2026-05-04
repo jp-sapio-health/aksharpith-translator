@@ -13,6 +13,7 @@ import DownloadMenu from './components/DownloadMenu';
 import QualitySummary from './components/QualitySummary';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
+import { ActiveJobsStrip } from '../components/ActiveJobsStrip';
 import { cn } from '../lib/utils';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -1153,6 +1154,10 @@ function HomeInner() {
           )}
         </div>
       </header>
+
+      {/* Active in-flight transliteration jobs (Phase 3). Self-hides when
+          there are none. Read-only — does not touch the upload pipeline. */}
+      <ActiveJobsStrip />
 
       {/* Tab strip — sticky under header */}
       <div className="sticky z-40 bg-paper/95 backdrop-blur border-b border-border" style={{ top: 'var(--header-h, 60px)' }}>

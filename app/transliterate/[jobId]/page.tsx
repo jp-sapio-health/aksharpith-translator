@@ -49,6 +49,47 @@ export default function TransliterationJobPage({
   const [pages, setPages] = useState<PageJob[]>([]);
   const [forbidden, setForbidden] = useState(false);
   const [translating, setTranslating] = useState(false);
+  const [linkCopied, setLinkCopied] = useState(false);
+
+  // Keyboard nav: j/k or ↓/↑ scrolls between page cards. Works once at
+  // least one page is rendered. Plain global handler — page cards are
+  // identified by id="page-N".
+  useEffect(() => {
+    function handler(e: KeyboardEvent) {
+      // Skip if focused on a form field or text editing.
+      const tag = (e.target as HTMLElement | null)?.tagName?.toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+      const dir = e.key === 'j' || e.key === 'ArrowDown' ? 1
+        : e.key === 'k' || e.key === 'ArrowUp' ? -1
+        : 0;
+      if (!dir) return;
+      e.preventDefault();
+      const cards = Array.from(document.querySelectorAll<HTMLElement>('[data-page-card]'));
+      if (cards.length === 0) return;
+      const y = window.scrollY + 120; // offset for sticky header
+      const idx = cards.findIndex((c) => c.offsetTop > y);
+      const targetIdx =
+        dir > 0
+          ? (idx === -1 ? cards.length - 1 : idx)
+          : Math.max(0, (idx === -1 ? cards.length : idx) - 2);
+      cards[Math.max(0, Math.min(cards.length - 1, targetIdx))]?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'start',
+      });
+    }
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
+
+  async function copyShareLink() {
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      setLinkCopied(true);
+      setTimeout(() => setLinkCopied(false), 1500);
+    } catch {
+      /* swallow */
+    }
+  }
 
   // Redirect anonymous users to login.
   useEffect(() => {
@@ -183,7 +224,17 @@ export default function TransliterationJobPage({
               {job.error && <span className="text-red-700 ml-2">{job.error}</span>}
             </p>
           </div>
-          <Button variant="outline" size="sm" onClick={() => router.push('/')}>← New upload</Button>
+          <div className="flex items-center gap-2 shrink-0">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={copyShareLink}
+              title="Copy a shareable link to this job"
+            >
+              {linkCopied ? '✓ Copied' : 'Share link'}
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => router.push('/')}>← New upload</Button>
+          </div>
         </div>
         {/* Linear progress bar */}
         <div className="max-w-6xl mx-auto mt-3">
@@ -259,7 +310,12 @@ export default function TransliterationJobPage({
               {transliteratedPages.map((p) => {
                 const open = openOriginals.has(p.pageNum);
                 return (
-                  <article key={p.pageNum} className="border-b border-stone-100 last:border-0 pb-3">
+                  <article
+                    key={p.pageNum}
+                    id={`page-${p.pageNum}`}
+                    data-page-card
+                    className="border-b border-stone-100 last:border-0 pb-3 scroll-mt-32"
+                  >
                     <header className="flex items-center justify-between mb-2 sticky top-0 bg-white py-1">
                       <span className="text-xs font-mono uppercase tracking-wider text-stone-500">
                         Page {p.pageNum}

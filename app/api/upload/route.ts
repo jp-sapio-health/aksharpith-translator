@@ -29,6 +29,28 @@ const IMAGE_MEDIA: Record<string, string> = {
   webp: 'image/webp',
 };
 
+// ─── Image → 1-page PDF wrapper ────────────────────────────────────────────────
+//
+// Routes image uploads through the same page-by-page worker pipeline that
+// handles PDFs. The local worker uses the Claude Code CLI session (Max plan,
+// zero API spend), so this avoids burning the Anthropic API key on each image.
+//
+// Supports PNG and JPG natively (pdf-lib's embedPng / embedJpg). WEBP and GIF
+// would need rasterisation first — caller surfaces a clean error for those.
+
+async function wrapImageInPdf(buf: Buffer, ext: string): Promise<Buffer> {
+  const doc = await PDFDocument.create();
+  const img =
+    ext === 'png'
+      ? await doc.embedPng(buf)
+      : await doc.embedJpg(buf); // 'jpg' | 'jpeg'
+  // Use the image's native pixel dimensions as the PDF page size — Claude
+  // OCR doesn't care about absolute size, only that the image fills the page.
+  const page = doc.addPage([img.width, img.height]);
+  page.drawImage(img, { x: 0, y: 0, width: img.width, height: img.height });
+  return Buffer.from(await doc.save());
+}
+
 // ─── PDF page splitting ─────────────────────────────────────────────────────────
 
 async function splitPdfIntoChunks(buf: Buffer, pagesPerChunk: number): Promise<Buffer[]> {
@@ -559,14 +581,50 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // ── Images: Claude vision OCR (PNG, JPG, WEBP, GIF)
+    // ── Images: route through the page-by-page worker as a 1-page PDF.
+    // The worker uses Claude Code CLI (Max plan, no API spend), bypassing
+    // the Anthropic API key entirely — same path PDFs already take.
     else if (IMAGE_MEDIA[ext]) {
       if (buf.length > MAX_CLAUDE_IMG) {
         return Response.json({
           error: `Image too large (${(buf.length / 1024 / 1024).toFixed(1)} MB). Maximum image size is 20 MB.`,
         }, { status: 400 });
       }
-      extracted = await callClaudeExtractOnce(apiKey, buf.toString('base64'), IMAGE_MEDIA[ext], IMAGE_PROMPT);
+
+      // pdf-lib only embeds PNG and JPG. WEBP / GIF would need rasterisation.
+      if (ext !== 'png' && ext !== 'jpg' && ext !== 'jpeg') {
+        return Response.json({
+          error: `${ext.toUpperCase()} images aren't supported yet — please convert to PNG or JPG and re-upload.`,
+        }, { status: 400 });
+      }
+
+      try {
+        const pdfBuf = await wrapImageInPdf(buf, ext);
+        // Reuse the staged blob name semantics from the PDF path so worker
+        // logs are consistent. enqueueTransliterationJob handles the upload.
+        const pdfFilename = filename.replace(/\.(png|jpe?g)$/i, '.pdf');
+        const { jobId, totalPages } = await enqueueTransliterationJob({
+          buf: pdfBuf,
+          filename: pdfFilename,
+          uid: authUser.uid,
+          email: authUser.email,
+        });
+        // Don't reuse the original image blob — it was an image, not the PDF
+        // the worker fetches. enqueueTransliterationJob created a fresh PDF
+        // blob; we still want to clean up the original image blob.
+        return Response.json({
+          jobId,
+          totalPages,
+          filename: pdfFilename,
+          status: 'transliterating',
+          message: `Image queued — OCR will run via local worker.`,
+        });
+      } catch (err) {
+        console.error('[upload] image → pdf wrap failed:', err);
+        return Response.json({
+          error: 'Could not queue this image for processing. Please retry.',
+        }, { status: 500 });
+      }
     }
 
     // ── DOCX: mammoth (preserving paragraph breaks)

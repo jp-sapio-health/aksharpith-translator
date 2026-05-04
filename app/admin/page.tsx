@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { collection, onSnapshot, orderBy, query } from 'firebase/firestore';
 import { useAuth } from '../../lib/auth-context';
@@ -9,6 +9,48 @@ import { getFirebaseDb } from '../../lib/firebase';
 import { Button } from '../../components/ui/button';
 import { cn } from '../../lib/utils';
 import type { TransliterationJobDocument } from '../../lib/job-types';
+
+// ── Action helper ───────────────────────────────────────────────────────────
+//
+// Cancel / force-fail / delete actions hit /api/admin/{jobs|transliteration-jobs}/[id]
+// with a Firebase ID token in the Authorization header. Server-side
+// verifyAdminToken enforces both the custom claim AND the email allowlist.
+
+type AdminAction = 'cancel' | 'force-fail' | 'delete';
+
+async function runAdminAction(
+  collectionPath: 'jobs' | 'transliteration-jobs',
+  id: string,
+  action: AdminAction,
+  getToken: () => Promise<string | null>,
+): Promise<{ ok: boolean; error?: string }> {
+  const token = await getToken();
+  if (!token) return { ok: false, error: 'No auth token' };
+
+  const url = `/api/admin/${collectionPath}/${id}`;
+  const opts: RequestInit =
+    action === 'delete'
+      ? { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } }
+      : {
+          method: 'PATCH',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ action }),
+        };
+
+  try {
+    const res = await fetch(url, opts);
+    if (!res.ok) {
+      const data = (await res.json().catch(() => null)) as { error?: string } | null;
+      return { ok: false, error: data?.error ?? `HTTP ${res.status}` };
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : 'network error' };
+  }
+}
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -108,9 +150,26 @@ export default function AdminPage() {
 // ── Feed (chronological list, expandable rows) ──────────────────────────────
 
 function AdminFeed() {
+  const { getIdToken } = useAuth();
   const [jobs, setJobs] = useState<JobDoc[]>([]);
   const [openId, setOpenId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [acting, setActing] = useState<string | null>(null);
+
+  const onAction = useCallback(
+    async (
+      kind: 'jobs' | 'transliteration-jobs',
+      id: string,
+      action: AdminAction,
+    ) => {
+      if (action === 'delete' && !confirm('Delete this job permanently?')) return;
+      setActing(id);
+      const res = await runAdminAction(kind, id, action, getIdToken);
+      if (!res.ok) alert(res.error ?? 'Action failed');
+      setActing(null);
+    },
+    [getIdToken],
+  );
 
   useEffect(() => {
     const db = getFirebaseDb();
@@ -172,13 +231,18 @@ function AdminFeed() {
                 job={job}
                 expanded={openId === job.id}
                 onToggle={() => setOpenId(openId === job.id ? null : job.id)}
+                onAction={(action) => onAction('jobs', job.id, action)}
+                acting={acting === job.id}
               />
             ))
           )}
         </ol>
 
         <h2 className="mt-10 mb-2 text-xs uppercase tracking-wider font-mono text-muted-foreground">Transliteration jobs (page-by-page PDF flow)</h2>
-        <TransliterationFeed />
+        <TransliterationFeed
+          onAction={(id, action) => onAction('transliteration-jobs', id, action)}
+          acting={acting}
+        />
       </main>
     </div>
   );
@@ -194,7 +258,13 @@ interface TransliterationJobRow extends TransliterationJobDocument {
   id: string;
 }
 
-function TransliterationFeed() {
+function TransliterationFeed({
+  onAction,
+  acting,
+}: {
+  onAction: (id: string, action: AdminAction) => void;
+  acting: string | null;
+}) {
   const [jobs, setJobs] = useState<TransliterationJobRow[]>([]);
   const [error, setError] = useState<string | null>(null);
 
@@ -213,6 +283,21 @@ function TransliterationFeed() {
     return unsub;
   }, []);
 
+  // Worker heartbeat + oldest pending — derived from the live snapshot.
+  const heartbeat = useMemo(() => {
+    const lastUpdate = jobs
+      .map((j) => j.updatedAt ?? '')
+      .filter(Boolean)
+      .sort()
+      .pop();
+    const oldestPending = jobs
+      .filter((j) => j.status === 'pending')
+      .map((j) => j.createdAt)
+      .filter(Boolean)
+      .sort()[0];
+    return { lastUpdate, oldestPending };
+  }, [jobs]);
+
   if (error) {
     return <p className="text-xs text-destructive">{error}</p>;
   }
@@ -226,8 +311,30 @@ function TransliterationFeed() {
   }
 
   return (
-    <ol className="space-y-2">
-      {jobs.map((job) => {
+    <>
+      {/* Health strip */}
+      <div className="mb-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+        {heartbeat.lastUpdate && (
+          <span>
+            Last worker write{' '}
+            <span className="font-mono text-foreground">{formatAgo(heartbeat.lastUpdate)}</span>
+          </span>
+        )}
+        {heartbeat.oldestPending && (
+          <span
+            className={cn(
+              Date.now() - new Date(heartbeat.oldestPending).getTime() > 5 * 60_000 &&
+                'text-[oklch(0.45_0.10_75)]',
+            )}
+          >
+            Oldest pending{' '}
+            <span className="font-mono text-foreground">{formatAgo(heartbeat.oldestPending)}</span>
+          </span>
+        )}
+      </div>
+
+      <ol className="space-y-2">
+        {jobs.map((job) => {
         const pct = job.totalPages > 0 ? Math.round((job.pagesCompleted / job.totalPages) * 100) : 0;
         const statusTone =
           job.status === 'done' ? 'text-[oklch(0.42_0.07_145)]' :
@@ -273,10 +380,78 @@ function TransliterationFeed() {
             {job.error && (
               <p className="px-4 pb-2 text-xs text-destructive">{job.error}</p>
             )}
+            {/* Action row — only show when actions are meaningful. */}
+            {(job.status === 'pending' || job.status === 'running' || job.status === 'failed' || job.status === 'cancelled') && (
+              <div className="flex items-center gap-1.5 px-4 pb-3">
+                {job.status === 'pending' && (
+                  <ActionButton
+                    tone="neutral"
+                    disabled={acting === job.id}
+                    onClick={() => onAction(job.id, 'cancel')}
+                  >
+                    Cancel
+                  </ActionButton>
+                )}
+                {job.status === 'running' && (
+                  <ActionButton
+                    tone="warn"
+                    disabled={acting === job.id}
+                    onClick={() => onAction(job.id, 'force-fail')}
+                  >
+                    Force-fail
+                  </ActionButton>
+                )}
+                <ActionButton
+                  tone="danger"
+                  disabled={acting === job.id}
+                  onClick={() => onAction(job.id, 'delete')}
+                >
+                  Delete
+                </ActionButton>
+              </div>
+            )}
           </li>
         );
       })}
-    </ol>
+      </ol>
+    </>
+  );
+}
+
+// ── Action button ───────────────────────────────────────────────────────────
+
+function ActionButton({
+  tone,
+  disabled,
+  onClick,
+  children,
+}: {
+  tone: 'neutral' | 'warn' | 'danger';
+  disabled?: boolean;
+  onClick: (e: React.MouseEvent) => void;
+  children: React.ReactNode;
+}) {
+  const palette =
+    tone === 'danger'
+      ? 'border-destructive/30 text-destructive hover:bg-destructive/5'
+      : tone === 'warn'
+        ? 'border-[oklch(0.85_0.06_75)] text-[oklch(0.45_0.10_75)] hover:bg-[oklch(0.95_0.04_75)]'
+        : 'border-border text-muted-foreground hover:bg-paper-warm hover:text-foreground';
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick(e);
+      }}
+      className={cn(
+        'text-[11px] font-mono uppercase tracking-wider px-2.5 py-1 rounded border transition-colors disabled:opacity-40 disabled:cursor-not-allowed',
+        palette,
+      )}
+    >
+      {children}
+    </button>
   );
 }
 
@@ -299,7 +474,19 @@ function StatsLine({ stats }: { stats: { pending: number; running: number; doneT
 
 // ── Job row ─────────────────────────────────────────────────────────────────
 
-function JobRow({ job, expanded, onToggle }: { job: JobDoc; expanded: boolean; onToggle: () => void }) {
+function JobRow({
+  job,
+  expanded,
+  onToggle,
+  onAction,
+  acting,
+}: {
+  job: JobDoc;
+  expanded: boolean;
+  onToggle: () => void;
+  onAction: (action: AdminAction) => void;
+  acting: boolean;
+}) {
   const stage = job.progress?.currentStage ?? '—';
   const commentary = job.progress?.commentary;
   const title = job.input?.bookTitle ?? job.input?.chapterTitle ?? `Job ${job.id.slice(0, 8)}`;
@@ -330,6 +517,26 @@ function JobRow({ job, expanded, onToggle }: { job: JobDoc; expanded: boolean; o
           <StatusPill status={job.status} stage={stage} />
         </div>
       </button>
+
+      {/* Action row — visible inline when expanded so the click target on
+          the main row stays a single toggle. */}
+      {expanded && (
+        <div className="flex items-center gap-1.5 px-4 pb-3">
+          {job.status === 'pending' && (
+            <ActionButton tone="neutral" disabled={acting} onClick={() => onAction('cancel')}>
+              Cancel
+            </ActionButton>
+          )}
+          {job.status === 'running' && (
+            <ActionButton tone="warn" disabled={acting} onClick={() => onAction('force-fail')}>
+              Force-fail
+            </ActionButton>
+          )}
+          <ActionButton tone="danger" disabled={acting} onClick={() => onAction('delete')}>
+            Delete
+          </ActionButton>
+        </div>
+      )}
 
       {expanded && <JobDetails job={job} />}
     </li>

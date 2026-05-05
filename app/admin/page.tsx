@@ -155,6 +155,54 @@ function AdminFeed() {
   const [openId, setOpenId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [acting, setActing] = useState<string | null>(null);
+  const [bulkActing, setBulkActing] = useState(false);
+  const [search, setSearch] = useState('');
+
+  const onBulkAction = useCallback(
+    async (
+      kind: 'jobs' | 'transliteration-jobs',
+      action:
+        | 'cancel-pending'
+        | 'force-fail-stuck'
+        | 'delete-failed'
+        | 'delete-cancelled',
+    ) => {
+      const labels: Record<typeof action, string> = {
+        'cancel-pending': 'Cancel ALL pending jobs?',
+        'force-fail-stuck': 'Force-fail ALL stuck/in-flight jobs? Worker may still emit completion writes.',
+        'delete-failed': 'Permanently delete ALL failed jobs (and their pages)?',
+        'delete-cancelled': 'Permanently delete ALL cancelled jobs (and their pages)?',
+      };
+      if (!confirm(labels[action])) return;
+      setBulkActing(true);
+      try {
+        const token = await getIdToken();
+        if (!token) {
+          alert('No auth token');
+          return;
+        }
+        const res = await fetch(`/api/admin/${kind}/bulk`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ action }),
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok) {
+          alert(data?.error ?? 'Bulk action failed');
+        } else {
+          // Brief toast-style notification — onSnapshot will update the
+          // list in real time, no manual refresh needed.
+          console.info(`[admin] ${action}: ${data?.affected ?? 0} job(s) updated`);
+        }
+      } finally {
+        setBulkActing(false);
+      }
+    },
+    [getIdToken],
+  );
 
   const onAction = useCallback(
     async (
@@ -197,6 +245,24 @@ function AdminFeed() {
     };
   }, [jobs]);
 
+  // Search filter — case-insensitive match on email + chapter title +
+  // book title + the first 200 chars of input. Empty search returns all.
+  const filteredJobs = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    if (!needle) return jobs;
+    return jobs.filter((j) => {
+      const haystack = [
+        j.email,
+        j.input?.chapterTitle ?? '',
+        j.input?.bookTitle ?? '',
+        (j.input?.text ?? '').slice(0, 200),
+      ]
+        .join(' ')
+        .toLowerCase();
+      return haystack.includes(needle);
+    });
+  }, [jobs, search]);
+
   return (
     <div className="min-h-screen bg-background text-foreground">
       <header className="border-b bg-paper">
@@ -218,14 +284,46 @@ function AdminFeed() {
 
         <StatsLine stats={stats} />
 
+        {/* Search + bulk actions strip */}
+        <div className="mt-4 flex flex-col gap-2">
+          <input
+            type="search"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search filename, email, chapter title…"
+            className="w-full rounded-md border bg-paper px-3 py-2 text-sm font-mono text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-foreground/10"
+          />
+          <div className="flex flex-wrap gap-1.5">
+            <BulkButton disabled={bulkActing} onClick={() => onBulkAction('transliteration-jobs', 'cancel-pending')}>
+              Cancel pending (translit)
+            </BulkButton>
+            <BulkButton tone="warn" disabled={bulkActing} onClick={() => onBulkAction('transliteration-jobs', 'force-fail-stuck')}>
+              Force-fail stuck (translit)
+            </BulkButton>
+            <BulkButton tone="danger" disabled={bulkActing} onClick={() => onBulkAction('transliteration-jobs', 'delete-failed')}>
+              Delete failed (translit)
+            </BulkButton>
+            <BulkButton tone="danger" disabled={bulkActing} onClick={() => onBulkAction('transliteration-jobs', 'delete-cancelled')}>
+              Delete cancelled (translit)
+            </BulkButton>
+            <span className="mx-1 self-center text-muted-foreground">·</span>
+            <BulkButton disabled={bulkActing} onClick={() => onBulkAction('jobs', 'cancel-pending')}>
+              Cancel pending (legacy)
+            </BulkButton>
+            <BulkButton tone="warn" disabled={bulkActing} onClick={() => onBulkAction('jobs', 'force-fail-stuck')}>
+              Force-fail stuck (legacy)
+            </BulkButton>
+          </div>
+        </div>
+
         <h2 className="mt-6 mb-2 text-xs uppercase tracking-wider font-mono text-muted-foreground">Translation jobs (legacy paste flow)</h2>
         <ol className="space-y-2">
-          {jobs.length === 0 ? (
+          {filteredJobs.length === 0 ? (
             <li className="rounded-md border bg-paper px-4 py-6 text-center text-sm text-muted-foreground">
-              No translation jobs yet.
+              {search.trim() ? 'No legacy jobs match this search.' : 'No translation jobs yet.'}
             </li>
           ) : (
-            jobs.map((job) => (
+            filteredJobs.map((job) => (
               <JobRow
                 key={job.id}
                 job={job}
@@ -240,6 +338,7 @@ function AdminFeed() {
 
         <h2 className="mt-10 mb-2 text-xs uppercase tracking-wider font-mono text-muted-foreground">Transliteration jobs (page-by-page PDF flow)</h2>
         <TransliterationFeed
+          search={search}
           onAction={(id, action) => onAction('transliteration-jobs', id, action)}
           acting={acting}
         />
@@ -259,14 +358,24 @@ interface TransliterationJobRow extends TransliterationJobDocument {
 }
 
 function TransliterationFeed({
+  search,
   onAction,
   acting,
 }: {
+  search: string;
   onAction: (id: string, action: AdminAction) => void;
   acting: string | null;
 }) {
   const [jobs, setJobs] = useState<TransliterationJobRow[]>([]);
   const [error, setError] = useState<string | null>(null);
+
+  const filteredJobs = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    if (!needle) return jobs;
+    return jobs.filter((j) =>
+      [j.filename ?? '', j.email ?? ''].join(' ').toLowerCase().includes(needle),
+    );
+  }, [jobs, search]);
 
   useEffect(() => {
     const db = getFirebaseDb();
@@ -312,6 +421,14 @@ function TransliterationFeed({
     );
   }
 
+  if (filteredJobs.length === 0) {
+    return (
+      <div className="rounded-md border bg-paper px-4 py-6 text-center text-sm text-muted-foreground">
+        No transliteration jobs match this search.
+      </div>
+    );
+  }
+
   return (
     <>
       {/* Health strip */}
@@ -336,7 +453,7 @@ function TransliterationFeed({
       </div>
 
       <ol className="space-y-2">
-        {jobs.map((job) => {
+        {filteredJobs.map((job) => {
         const pct = job.totalPages > 0 ? Math.round((job.pagesCompleted / job.totalPages) * 100) : 0;
         const statusTone =
           job.status === 'done' ? 'text-[oklch(0.42_0.07_145)]' :
@@ -428,6 +545,43 @@ function TransliterationFeed({
       })}
       </ol>
     </>
+  );
+}
+
+// ── Bulk button ─────────────────────────────────────────────────────────────
+//
+// Slightly bigger than ActionButton (the pill-style row buttons) — meant to
+// sit at the top of the feed and apply across the entire matching status set.
+
+function BulkButton({
+  tone = 'neutral',
+  disabled,
+  onClick,
+  children,
+}: {
+  tone?: 'neutral' | 'warn' | 'danger';
+  disabled?: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  const palette =
+    tone === 'danger'
+      ? 'border-destructive/30 text-destructive hover:bg-destructive/5'
+      : tone === 'warn'
+        ? 'border-[oklch(0.85_0.06_75)] text-[oklch(0.45_0.10_75)] hover:bg-[oklch(0.95_0.04_75)]'
+        : 'border-border text-muted-foreground hover:bg-paper-warm hover:text-foreground';
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      className={cn(
+        'text-[11px] font-mono uppercase tracking-wider px-2.5 py-1 rounded border transition-colors disabled:opacity-40 disabled:cursor-not-allowed',
+        palette,
+      )}
+    >
+      {children}
+    </button>
   );
 }
 

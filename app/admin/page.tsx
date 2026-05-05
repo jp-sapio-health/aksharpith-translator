@@ -366,8 +366,10 @@ function TransliterationFeed({
   onAction: (id: string, action: AdminAction) => void;
   acting: string | null;
 }) {
+  const { getIdToken } = useAuth();
   const [jobs, setJobs] = useState<TransliterationJobRow[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const filteredJobs = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -537,14 +539,152 @@ function TransliterationFeed({
                   >
                     Delete
                   </ActionButton>
+                  <ActionButton
+                    tone="neutral"
+                    onClick={() => setExpandedId(expandedId === job.id ? null : job.id)}
+                  >
+                    {expandedId === job.id ? 'Hide pages' : 'Pages…'}
+                  </ActionButton>
                 </div>
               );
             })()}
+            {/* Pages panel — lazy-rendered so we don't subscribe to every
+                job's pages subcollection up front. */}
+            {expandedId === job.id && (
+              <PagesPanel jobId={job.id} getToken={getIdToken} />
+            )}
           </li>
         );
       })}
       </ol>
     </>
+  );
+}
+
+// ── Pages panel (lazy per-job page list with retry) ────────────────────────
+//
+// Subscribes to a single job's `pages` subcollection only when expanded.
+// Renders a chip per page colour-coded by status; failed pages get a
+// 'Retry' button that flips them back to pending via the admin API.
+
+function PagesPanel({
+  jobId,
+  getToken,
+}: {
+  jobId: string;
+  getToken: () => Promise<string | null>;
+}) {
+  type PageRow = {
+    pageNum: number;
+    status: 'pending' | 'ocr_running' | 'ocr_done' | 'ocr_failed';
+    error?: string | null;
+    attempts?: number;
+  };
+  const [pages, setPages] = useState<PageRow[]>([]);
+  const [retrying, setRetrying] = useState<number | null>(null);
+
+  useEffect(() => {
+    const db = getFirebaseDb();
+    const q = query(
+      collection(db, 'transliterationJobs', jobId, 'pages'),
+      orderBy('pageNum'),
+    );
+    const unsub = onSnapshot(q, (snap) => {
+      const next: PageRow[] = [];
+      snap.forEach((d) => next.push(d.data() as PageRow));
+      setPages(next);
+    });
+    return unsub;
+  }, [jobId]);
+
+  async function retry(pageNum: number) {
+    setRetrying(pageNum);
+    try {
+      const token = await getToken();
+      if (!token) {
+        alert('No auth token');
+        return;
+      }
+      const res = await fetch(
+        `/api/admin/transliteration-jobs/${jobId}/pages/${pageNum}/retry`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
+      const data = await res.json().catch(() => null);
+      if (!res.ok) alert(data?.error ?? 'Retry failed');
+    } finally {
+      setRetrying(null);
+    }
+  }
+
+  const failed = pages.filter((p) => p.status === 'ocr_failed');
+
+  const tone: Record<PageRow['status'], string> = {
+    pending: 'bg-stone-100 text-stone-500 border-stone-200',
+    ocr_running: 'bg-amber-100 text-amber-800 border-amber-200 animate-pulse',
+    ocr_done: 'bg-emerald-100 text-emerald-800 border-emerald-200',
+    ocr_failed: 'bg-destructive/10 text-destructive border-destructive/30',
+  };
+
+  return (
+    <div className="border-t border-stone-200 bg-paper-warm/40 px-4 py-3 space-y-3">
+      {pages.length === 0 ? (
+        <p className="text-xs text-muted-foreground">Loading pages…</p>
+      ) : (
+        <>
+          <div className="flex flex-wrap gap-1">
+            {pages.map((p) => (
+              <span
+                key={p.pageNum}
+                title={`Page ${p.pageNum} · ${p.status}${p.error ? ` — ${p.error}` : ''}${p.attempts ? ` · ${p.attempts} attempt${p.attempts === 1 ? '' : 's'}` : ''}`}
+                className={cn(
+                  'inline-flex items-center justify-center h-6 min-w-[2rem] px-1.5 rounded border text-[11px] font-mono tabular-nums',
+                  tone[p.status],
+                )}
+              >
+                {p.pageNum}
+              </span>
+            ))}
+          </div>
+          {failed.length === 0 ? (
+            <p className="text-[11px] text-muted-foreground">
+              No failed pages. {pages.filter((p) => p.status === 'ocr_done').length} of {pages.length} complete.
+            </p>
+          ) : (
+            <div className="space-y-2">
+              <p className="text-[11px] font-mono uppercase tracking-wider text-destructive">
+                {failed.length} failed page{failed.length === 1 ? '' : 's'}
+              </p>
+              <div className="flex flex-col gap-1.5">
+                {failed.map((p) => (
+                  <div
+                    key={p.pageNum}
+                    className="flex items-center gap-2 text-xs"
+                  >
+                    <span className="font-mono w-12 text-muted-foreground">p.{p.pageNum}</span>
+                    <span className="flex-1 text-destructive truncate">
+                      {p.error ?? 'OCR failed'}
+                      {p.attempts != null && (
+                        <span className="text-muted-foreground"> · {p.attempts} attempt{p.attempts === 1 ? '' : 's'}</span>
+                      )}
+                    </span>
+                    <ActionButton
+                      tone="warn"
+                      disabled={retrying === p.pageNum}
+                      onClick={() => retry(p.pageNum)}
+                    >
+                      {retrying === p.pageNum ? '…' : 'Retry'}
+                    </ActionButton>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
   );
 }
 

@@ -26,7 +26,10 @@ export default function DownloadMenu({ output, translationId, filename, getToken
 
   const baseName = filename ? filename.replace(/\.[^.]+$/, '') : 'translation';
 
-  const downloadTxt = () => {
+  // Local-only fallback: plain prose blob, used when we don't have a
+  // translationId yet (live preview before save). Skips the flag appendix
+  // because we can't fetch chunk data without an ID.
+  const downloadTxtLocal = () => {
     const blob = new Blob([output], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = Object.assign(document.createElement('a'), { href: url, download: `${baseName}-en.txt` });
@@ -35,10 +38,10 @@ export default function DownloadMenu({ output, translationId, filename, getToken
     setOpen(false);
   };
 
-  const downloadFromApi = async (format: 'docx' | 'docx-reviews' | 'training-json') => {
+  const downloadFromApi = async (format: 'txt' | 'docx' | 'docx-reviews' | 'training-json') => {
     if (!translationId) {
-      // Fallback: if no translationId, download plain text
-      downloadTxt();
+      // Fallback: no ID → no chunkData → return plain prose without flags.
+      downloadTxtLocal();
       return;
     }
     setDownloading(format);
@@ -68,7 +71,12 @@ export default function DownloadMenu({ output, translationId, filename, getToken
       } else {
         const blob = await res.blob();
         const url = URL.createObjectURL(blob);
-        const ext = format === 'docx-reviews' ? '-with-reviews.docx' : '.docx';
+        const ext =
+          format === 'txt'
+            ? '.txt'
+            : format === 'docx-reviews'
+              ? '-with-reviews.docx'
+              : '.docx';
         const a = Object.assign(document.createElement('a'), { href: url, download: `${baseName}-en${ext}` });
         a.click();
         URL.revokeObjectURL(url);
@@ -81,9 +89,9 @@ export default function DownloadMenu({ output, translationId, filename, getToken
   };
 
   const formats: Array<{ id: Format; label: string; desc: string }> = [
-    { id: 'txt', label: 'Plain Text (.txt)', desc: 'Translation only' },
-    { id: 'docx', label: 'Word Document (.docx)', desc: 'Formatted with verse styling' },
-    { id: 'docx-reviews', label: 'Word + Reviews (.docx)', desc: 'Includes reviewer comments' },
+    { id: 'txt', label: 'Plain Text (.txt)', desc: 'Translation + translator flags appendix' },
+    { id: 'docx', label: 'Word Document (.docx)', desc: 'Verse styling + translator flags appendix' },
+    { id: 'docx-reviews', label: 'Word + Reviews (.docx)', desc: 'Adds reviewer comments to the docx export' },
     { id: 'training-json', label: 'Training Data (.json)', desc: 'Source + translation + scores + comments' },
   ];
 
@@ -113,7 +121,7 @@ export default function DownloadMenu({ output, translationId, filename, getToken
           {formats.map(fmt => (
             <button
               key={fmt.id}
-              onClick={() => fmt.id === 'txt' ? downloadTxt() : downloadFromApi(fmt.id)}
+              onClick={() => downloadFromApi(fmt.id)}
               disabled={downloading !== null}
               style={{
                 display: 'block', width: '100%', textAlign: 'left',
